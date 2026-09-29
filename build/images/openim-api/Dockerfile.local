@@ -1,0 +1,23 @@
+# Local MicroK8s image for the forked Platform API.  It deliberately keeps the
+# upstream runtime filesystem/entrypoint because the Helm deployment mounts its
+# config at this path; only the API binary is replaced with our fork build.
+FROM golang:1.25-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/openim-api ./cmd/openim-api
+
+FROM ghcr.io/openimsdk/openim-api:release-v3.6
+COPY --from=build /out/openim-api /openim/openim-server/bin/openim-api
+# The legacy chart supplies a single consolidated config.yaml, whereas the
+# forked API reads split files. Bake the equivalent local-MicroK8s defaults;
+# notification.yaml remains mountable by the chart.
+COPY config/ /openim/openim-server/config/
+RUN sed -i 's/enable: etcd/enable: kubernetes/; s/namespace: default/namespace: openim/' /openim/openim-server/config/discovery.yml \
+ && sed -i 's/user-rpc-service/openimserver-openim-rpc-user:80/; s/friend-rpc-service/openimserver-openim-rpc-friend:80/; s/msg-rpc-service/openimserver-openim-rpc-msg:80/; s/push-rpc-service/openimserver-openim-push:80/; s/messagegateway-rpc-service/openimserver-openim-msggateway:88/; s/group-rpc-service/openimserver-openim-rpc-group:80/; s/auth-rpc-service/openimserver-openim-rpc-auth:80/; s/conversation-rpc-service/openimserver-openim-rpc-conversation:80/; s/third-rpc-service/openimserver-openim-rpc-third:80/' /openim/openim-server/config/discovery.yml \
+ && sed -i 's/ports: \[ 10002 \]/ports: [ 80 ]/' /openim/openim-server/config/openim-api.yml \
+ && sed -i 's/localhost:37017/im-mongodb:27017/; s/authSource: openim_v3/authSource: admin/' /openim/openim-server/config/mongodb.yml \
+ && sed -i 's/localhost:16379/im-redis-master:6379/' /openim/openim-server/config/redis.yml \
+ && sed -i 's/localhost:19094/im-kafka:9092/; s/^username:.*/username: user1/; s/^password:.*/password: proot/; s/^toRedisTopic:.*/toRedisTopic: latestMsgToRedis/; s/^toMongoTopic:.*/toMongoTopic: offlineMsgToMongoMysql/; s/^toPushTopic:.*/toPushTopic: msgToPush/' /openim/openim-server/config/kafka.yml \
+ && sed -i 's#localhost:10005#im-minio:9000#g' /openim/openim-server/config/minio.yml

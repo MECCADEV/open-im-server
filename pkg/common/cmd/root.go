@@ -110,8 +110,12 @@ func (r *RootCmd) persistentPreRun(cmd *cobra.Command, opts ...func(*CmdOpts)) e
 	if err := r.initializeLogger(cmdOpts); err != nil {
 		return errs.WrapMsg(err, "failed to initialize logger")
 	}
-	if err := r.etcdClient.Close(); err != nil {
-		return errs.WrapMsg(err, "failed to close etcd client")
+	// Kubernetes discovery does not create an etcd client. Closing a nil client
+	// made every Kubernetes-mode API process panic during startup.
+	if r.etcdClient != nil {
+		if err := r.etcdClient.Close(); err != nil {
+			return errs.WrapMsg(err, "failed to close etcd client")
+		}
 	}
 	return nil
 }

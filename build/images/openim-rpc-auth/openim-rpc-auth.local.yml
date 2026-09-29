@@ -1,0 +1,17 @@
+rpc:
+  listenIP: 0.0.0.0
+  autoSetPorts: false
+  ports: [80]
+
+prometheus:
+  enable: false
+  ports: [90]
+
+tokenPolicy:
+  expire: 90
+
+ratelimiter:
+  enable: false
+
+circuitBreaker:
+  enable: false

@@ -1,0 +1,12 @@
+FROM golang:1.25-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/openim-rpc-group ./cmd/openim-rpc/openim-rpc-group
+
+FROM localhost:32000/meccadev-openim-api:fork-dev3
+COPY --from=build /out/openim-rpc-group /openim/openim-server/bin/openim-rpc-group
+COPY build/images/openim-rpc-group/openim-rpc-group.local.yml /openim/openim-server/config/openim-rpc-group.yml
+COPY build/images/openim-rpc-user/mongodb.local.yml /openim/openim-server/config/mongodb.yml
+ENTRYPOINT ["./bin/openim-rpc-group"]
