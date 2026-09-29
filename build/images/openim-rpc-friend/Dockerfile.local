@@ -5,7 +5,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/openim-rpc-friend ./cmd/openim-rpc/openim-rpc-friend
 
-FROM localhost:32000/meccadev-openim-api:fork-dev3
+FROM localhost:32000/meccadev-openim-api:fork-dev4
 COPY --from=build /out/openim-rpc-friend /openim/openim-server/bin/openim-rpc-friend
 COPY build/images/openim-rpc-friend/openim-rpc-friend.local.yml /openim/openim-server/config/openim-rpc-friend.yml
 COPY build/images/openim-rpc-user/mongodb.local.yml /openim/openim-server/config/mongodb.yml

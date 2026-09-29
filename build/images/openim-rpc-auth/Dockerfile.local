@@ -7,7 +7,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/openim-rpc-auth ./cmd/openim-rpc/openim-rpc-auth
 
-FROM localhost:32000/meccadev-openim-api:fork-dev3
+FROM localhost:32000/meccadev-openim-api:fork-dev4
 COPY --from=build /out/openim-rpc-auth /openim/openim-server/bin/openim-rpc-auth
 COPY build/images/openim-rpc-auth/openim-rpc-auth.local.yml /openim/openim-server/config/openim-rpc-auth.yml
 ENTRYPOINT ["./bin/openim-rpc-auth"]

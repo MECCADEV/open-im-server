@@ -10,6 +10,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/openim-api ./cmd/o
 
 FROM ghcr.io/openimsdk/openim-api:release-v3.6
 COPY --from=build /out/openim-api /openim/openim-server/bin/openim-api
+ENV CONFIG_PATH=/openim/openim-server/config
 # The legacy chart supplies a single consolidated config.yaml, whereas the
 # forked API reads split files. Bake the equivalent local-MicroK8s defaults;
 # notification.yaml remains mountable by the chart.
