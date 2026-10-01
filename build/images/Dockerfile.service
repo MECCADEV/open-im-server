@@ -1,0 +1,17 @@
+# Build a non-forked OpenIM service against the same runtime filesystem and
+# split configuration as the MECCADEV API image. SERVICE_PATH is a Go package
+# path (for example cmd/openim-rpc/openim-rpc-msg); SERVICE_BINARY is its name.
+ARG OPENIM_API_IMAGE=registry.meainternal.com/pingmessenger/openim-api:20260930-1
+FROM golang:1.25-alpine AS build
+ARG SERVICE_PATH
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/service ./${SERVICE_PATH}
+
+FROM ${OPENIM_API_IMAGE}
+ARG SERVICE_BINARY
+COPY --from=build /out/service /openim/openim-server/bin/${SERVICE_BINARY}
+RUN printf '%s\n' '#!/bin/sh' "exec /openim/openim-server/bin/${SERVICE_BINARY} \"\$@\"" > /entrypoint.sh && chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]

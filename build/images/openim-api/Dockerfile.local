@@ -20,5 +20,5 @@ RUN sed -i 's/enable: etcd/enable: kubernetes/; s/namespace: default/namespace: 
  && sed -i 's/ports: \[ 10002 \]/ports: [ 80 ]/' /openim/openim-server/config/openim-api.yml \
  && sed -i 's/localhost:37017/im-mongodb:27017/; s/authSource: openim_v3/authSource: admin/' /openim/openim-server/config/mongodb.yml \
  && sed -i 's/localhost:16379/im-redis-master:6379/' /openim/openim-server/config/redis.yml \
- && sed -i 's/localhost:19094/im-kafka:9092/; s/^username:.*/username: user1/; s/^password:.*/password: proot/; s/^toRedisTopic:.*/toRedisTopic: latestMsgToRedis/; s/^toMongoTopic:.*/toMongoTopic: offlineMsgToMongoMysql/; s/^toPushTopic:.*/toPushTopic: msgToPush/' /openim/openim-server/config/kafka.yml \
- && sed -i 's#localhost:10005#im-minio:9000#g' /openim/openim-server/config/minio.yml
+ && sed -i 's/localhost:19094/im-kafka:9092/; s/^toRedisTopic:.*/toRedisTopic: latestMsgToRedis/; s/^toMongoTopic:.*/toMongoTopic: offlineMsgToMongoMysql/; s/^toPushTopic:.*/toPushTopic: msgToPush/' /openim/openim-server/config/kafka.yml \
+ && sed -i 's/enable: minio/enable: aws/; s/region: ap-southeast-2/region: ap-south-1/; s/bucket: testdemo832234/bucket: pingmessenger-openim-403048695675-ap-south-1/' /openim/openim-server/config/openim-rpc-third.yml
