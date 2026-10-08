@@ -1,0 +1,9 @@
+uri:
+address: [im-mongodb:27017]
+database: openim_v3
+username: openIM
+password: openIM123
+authSource: openim_v3
+maxPoolSize: 100
+maxRetry: 10
+mongoMode: standalone
