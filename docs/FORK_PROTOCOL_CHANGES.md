@@ -80,3 +80,12 @@ changes together:
 
 Do not replace this with upstream `ForceLogout`: doing so broadens revocation
 from a device token to every token on that OpenIM platform.
+# Payment custom message
+
+PingMessenger payment state is carried through the existing OpenIM custom
+message transport as a JSON `PaymentMessageV1` envelope (`schema:
+pingmessenger.payment.v1`). The platform emits `payment.created` and
+`payment.updated` messages with a monotonically increasing `version`; clients
+replace an older message only when the version increases. OpenIM does not own
+the ledger or blockchain transaction state, and PingPay-user remains behind the
+platform's authenticated watcher boundary.
