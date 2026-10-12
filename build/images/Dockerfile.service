@@ -18,5 +18,6 @@ COPY --from=build /out/service /openim/openim-server/bin/${SERVICE_BINARY}
 # deliver token-scoped offline events. Other services retain the base image's
 # configuration.
 COPY open-im-server/config/openim-msggateway.yml /openim/openim-server/config/openim-msggateway.yml
+COPY open-im-server/config/openim-rpc-conversation.yml /openim/openim-server/config/openim-rpc-conversation.yml
 RUN printf '%s\n' '#!/bin/sh' "exec /openim/openim-server/bin/${SERVICE_BINARY} \"\$@\"" > /entrypoint.sh && chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]

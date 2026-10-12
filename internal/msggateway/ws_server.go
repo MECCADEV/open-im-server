@@ -210,7 +210,7 @@ func NewWsServer(msgGatewayConfig *Config, opts ...Option) *WsServer {
 		clients:         newUserMap(),
 		subscription:    newSubscription(),
 		Compressor:      NewGzipCompressor(),
-		webhookClient:   webhook.NewWebhookClient(msgGatewayConfig.WebhooksConfig.URL),
+		webhookClient:   webhook.NewWebhookClientForConfig(msgGatewayConfig.WebhooksConfig),
 	}
 }
 

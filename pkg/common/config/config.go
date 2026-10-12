@@ -475,6 +475,8 @@ func (r *RpcService) GetServiceNames() []string {
 // FullConfig stores all configurations for before and after events
 type Webhooks struct {
 	URL                                 string       `yaml:"url"`
+	Transport                           string       `yaml:"transport"`
+	GRPCTarget                          string       `yaml:"grpcTarget"`
 	BeforeSendSingleMsg                 BeforeConfig `yaml:"beforeSendSingleMsg"`
 	BeforeUpdateUserInfoEx              BeforeConfig `yaml:"beforeUpdateUserInfoEx"`
 	AfterUpdateUserInfoEx               AfterConfig  `yaml:"afterUpdateUserInfoEx"`

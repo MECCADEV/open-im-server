@@ -100,7 +100,7 @@ func Start(ctx context.Context, config *Config, client discovery.SvcDiscoveryReg
 
 	cs := conversationServer{
 		config:        config,
-		webhookClient: webhook.NewWebhookClient(config.WebhooksConfig.URL),
+		webhookClient: webhook.NewWebhookClientForConfig(config.WebhooksConfig),
 		userClient:    rpcli.NewUserClient(userConn),
 		groupClient:   rpcli.NewGroupClient(groupConn),
 		msgClient:     msgClient,

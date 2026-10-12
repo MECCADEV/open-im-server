@@ -137,7 +137,7 @@ func Start(ctx context.Context, config *Config, client discovery.SvcDiscoveryReg
 		ConversationLocalCache: rpccache.NewConversationLocalCache(conversationClient, &config.LocalCacheConfig, rdb),
 		FriendLocalCache:       rpccache.NewFriendLocalCache(rpcli.NewRelationClient(friendConn), &config.LocalCacheConfig, rdb),
 		config:                 config,
-		webhookClient:          webhook.NewWebhookClient(config.WebhooksConfig.URL),
+		webhookClient:          webhook.NewWebhookClientForConfig(config.WebhooksConfig),
 		conversationClient:     conversationClient,
 		adminUserIDs:           config.Share.IMAdminUser.UserIDs,
 	}

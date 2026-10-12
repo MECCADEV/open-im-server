@@ -35,7 +35,7 @@ func NewOnlineHistoryMongoConsumerHandler(database controller.MsgTransferDatabas
 	return &OnlineHistoryMongoConsumerHandler{
 		msgTransferDatabase: database,
 		config:              config,
-		webhookClient:       webhook.NewWebhookClient(config.WebhooksConfig.URL),
+		webhookClient:       webhook.NewWebhookClientForConfig(config.WebhooksConfig),
 	}
 }
 

@@ -133,7 +133,7 @@ func Start(ctx context.Context, config *Config, client discovery.SvcDiscoveryReg
 		friendNotificationSender: relation.NewFriendNotificationSender(&config.NotificationConfig, msgClient, relation.WithDBFunc(database.FindWithError)),
 		userNotificationSender:   NewUserNotificationSender(config, msgClient, WithUserFunc(database.FindWithError)),
 		config:                   config,
-		webhookClient:            webhook.NewWebhookClient(config.WebhooksConfig.URL),
+		webhookClient:            webhook.NewWebhookClientForConfig(config.WebhooksConfig),
 		clientConfig:             controller.NewClientConfigDatabase(clientConfigDB, redis.NewClientConfigCache(rdb, clientConfigDB), mgocli.GetTx()),
 		groupClient:              rpcli.NewGroupClient(groupConn),
 		relationClient:           rpcli.NewRelationClient(friendConn),

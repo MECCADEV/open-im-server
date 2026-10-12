@@ -75,7 +75,7 @@ func NewConsumerHandler(ctx context.Context, config *Config, database controller
 	consumerHandler.onlinePusher = onlinePusher
 	consumerHandler.groupLocalCache = rpccache.NewGroupLocalCache(consumerHandler.groupClient, &config.LocalCacheConfig, rdb)
 	consumerHandler.conversationLocalCache = rpccache.NewConversationLocalCache(consumerHandler.conversationClient, &config.LocalCacheConfig, rdb)
-	consumerHandler.webhookClient = webhook.NewWebhookClient(config.WebhooksConfig.URL)
+	consumerHandler.webhookClient = webhook.NewWebhookClientForConfig(config.WebhooksConfig)
 	consumerHandler.config = config
 	consumerHandler.pushDatabase = database
 	consumerHandler.onlineCache, err = rpccache.NewOnlineCache(consumerHandler.userClient, consumerHandler.groupLocalCache, rdb, config.RpcConfig.FullUserCache, nil)

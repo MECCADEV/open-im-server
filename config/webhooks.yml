@@ -1,4 +1,7 @@
 url: http://127.0.0.1:10006/callbackExample
+# The Platform deployment receives graph callbacks over gRPC.
+transport: grpc
+grpcTarget: 127.0.0.1:9090
 beforeSendSingleMsg:
   enable: false
   timeout: 5
@@ -162,24 +165,24 @@ beforeAddBlack:
   timeout: 5
   failedContinue:
 afterAddFriend:
-  enable: false
+  enable: true
   timeout: 5
 beforeAddFriendAgree:
   enable: false
   timeout: 5
   failedContinue: true
 afterAddFriendAgree:
-  enable: false
+  enable: true
   timeout: 5
 afterDeleteFriend:
-  enable: false
+  enable: true
   timeout: 5
 beforeImportFriends:
   enable: false
   timeout: 5
   failedContinue: true
 afterImportFriends:
-  enable: false
+  enable: true
   timeout: 5
 afterRemoveBlack:
   enable: false
@@ -189,7 +192,7 @@ beforeCreateSingleChatConversations:
   timeout: 5
   failedContinue: false
 afterCreateSingleChatConversations:
-  enable: false
+  enable: true
   timeout: 5
   failedContinue: false
 beforeCreateGroupChatConversations:

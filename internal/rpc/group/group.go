@@ -116,7 +116,7 @@ func Start(ctx context.Context, config *Config, client discovery.SvcDiscoveryReg
 	}
 	gs := groupServer{
 		config:             config,
-		webhookClient:      webhook.NewWebhookClient(config.WebhooksConfig.URL),
+		webhookClient:      webhook.NewWebhookClientForConfig(config.WebhooksConfig),
 		userClient:         rpcli.NewUserClient(userConn),
 		msgClient:          rpcli.NewMsgClient(msgConn),
 		conversationClient: rpcli.NewConversationClient(conversationConn),

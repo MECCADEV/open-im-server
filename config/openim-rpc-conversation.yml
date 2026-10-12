@@ -5,17 +5,17 @@ rpc:
   listenIP: 0.0.0.0
   # autoSetPorts indicates whether to automatically set the ports
   # if you use in kubernetes, set it to false
-  autoSetPorts: true
+  autoSetPorts: false
   # List of ports that the RPC service listens on; configuring multiple ports will launch multiple instances. These must match the number of configured prometheus ports
   # It will only take effect when autoSetPorts is set to false.
-  ports:
+  ports: [ 10220 ]
 
 prometheus:
   # Enable Prometheus metrics exposure for this service; set to true to allow scraping.
   enable: true
   # List of ports that Prometheus listens on; these must match the number of rpc.ports to ensure correct monitoring setup
   # It will only take effect when autoSetPorts is set to false.
-  ports:
+  ports: [ 12220 ]
 
 ratelimiter:
   # Whether to enable rate limiting
