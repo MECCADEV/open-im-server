@@ -239,7 +239,10 @@ func (k *KubernetesConnManager) getServicePort(serviceName string) (int32, error
 // watchEndpoints listens for changes in Pod resources.
 func (k *KubernetesConnManager) watchEndpoints() {
 	informerFactory := informers.NewSharedInformerFactory(k.clientset, time.Minute*10)
-	informer := informerFactory.Core().V1().Pods().Informer()
+	// Service endpoint changes drive the connection map used by push and other
+	// fan-out clients. Watching Pods here is incorrect: the callback expects an
+	// *v1.Endpoints and therefore silently ignored every event.
+	informer := informerFactory.Core().V1().Endpoints().Informer()
 
 	// Watch for Pod changes (add, update, delete)
 	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{

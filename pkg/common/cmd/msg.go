@@ -59,6 +59,16 @@ func (a *MsgRpcCmd) Exec() error {
 }
 
 func (a *MsgRpcCmd) runE() error {
+	// The Kubernetes chart may mount no component-specific config. Keep the
+	// documented cluster ports deterministic instead of selecting ephemeral
+	// listeners that Services cannot route to.
+	if len(a.msgConfig.RpcConfig.RPC.Ports) == 0 {
+		a.msgConfig.RpcConfig.RPC.AutoSetPorts = false
+		a.msgConfig.RpcConfig.RPC.Ports = []int{10280}
+	}
+	if len(a.msgConfig.RpcConfig.Prometheus.Ports) == 0 {
+		a.msgConfig.RpcConfig.Prometheus.Ports = []int{12280}
+	}
 	return startrpc.Start(a.ctx, &a.msgConfig.Discovery, &a.msgConfig.RpcConfig.CircuitBreaker, &a.msgConfig.RpcConfig.RateLimiter, &a.msgConfig.RpcConfig.Prometheus, a.msgConfig.RpcConfig.RPC.ListenIP,
 		a.msgConfig.RpcConfig.RPC.RegisterIP, a.msgConfig.RpcConfig.RPC.AutoSetPorts, a.msgConfig.RpcConfig.RPC.Ports,
 		a.Index(), a.msgConfig.Discovery.RpcService.Msg, &a.msgConfig.NotificationConfig, a.msgConfig,

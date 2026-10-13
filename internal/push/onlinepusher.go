@@ -3,6 +3,7 @@ package push
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/openimsdk/protocol/msggateway"
@@ -66,7 +67,11 @@ func NewDefaultAllNode(disCov discovery.Conn, config *Config) *DefaultAllNode {
 
 func (d *DefaultAllNode) GetConnsAndOnlinePush(ctx context.Context, msg *sdkws.MsgData,
 	pushToUserIDs []string) (wsResults []*msggateway.SingleMsgToUserResults, err error) {
-	conns, err := d.disCov.GetConns(ctx, d.config.Discovery.RpcService.MessageGateway)
+	// Kubernetes discovery indexes watched endpoints by service name, while
+	// config commonly carries service:port (for example, :88). Normalize the
+	// lookup so the push fan-out uses the populated connection set.
+	messageGatewayService := strings.SplitN(d.config.Discovery.RpcService.MessageGateway, ":", 2)[0]
+	conns, err := d.disCov.GetConns(ctx, messageGatewayService)
 	if len(conns) == 0 {
 		log.ZWarn(ctx, "get gateway conn 0 ", nil)
 	} else {

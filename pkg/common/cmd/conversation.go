@@ -58,6 +58,15 @@ func (a *ConversationRpcCmd) Exec() error {
 }
 
 func (a *ConversationRpcCmd) runE() error {
+	// Match the fork's Kubernetes deployment contract when no component config
+	// file is supplied by the chart.
+	if len(a.conversationConfig.RpcConfig.RPC.Ports) == 0 {
+		a.conversationConfig.RpcConfig.RPC.AutoSetPorts = false
+		a.conversationConfig.RpcConfig.RPC.Ports = []int{10220}
+	}
+	if len(a.conversationConfig.RpcConfig.Prometheus.Ports) == 0 {
+		a.conversationConfig.RpcConfig.Prometheus.Ports = []int{12220}
+	}
 	return startrpc.Start(a.ctx, &a.conversationConfig.Discovery, &a.conversationConfig.RpcConfig.CircuitBreaker, &a.conversationConfig.RpcConfig.RateLimiter, &a.conversationConfig.RpcConfig.Prometheus, a.conversationConfig.RpcConfig.RPC.ListenIP,
 		a.conversationConfig.RpcConfig.RPC.RegisterIP, a.conversationConfig.RpcConfig.RPC.AutoSetPorts, a.conversationConfig.RpcConfig.RPC.Ports,
 		a.Index(), a.conversationConfig.Discovery.RpcService.Conversation, &a.conversationConfig.NotificationConfig, a.conversationConfig,
