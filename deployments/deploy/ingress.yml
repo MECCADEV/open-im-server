@@ -3,23 +3,31 @@ kind: Ingress
 metadata:
   name: openim-ingress
   annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
 spec:
   ingressClassName: openim-nginx
   rules:
     - http:
         paths:
-          - path: /openim-api
-            pathType: Prefix
+          - path: /openim-api(/|$)(.*)
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: openim-api-service
                 port:
                   number: 10002
-          - path: /openim-msggateway
-            pathType: Prefix
+          - path: /openim-msggateway(/|$)(.*)
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: openim-msggateway-service
                 port:
                   number: 10001
+          - path: /openim/object(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: openim-api-service
+                port:
+                  number: 10002
