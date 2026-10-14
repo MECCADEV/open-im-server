@@ -25,10 +25,10 @@ import (
 	"github.com/openimsdk/tools/s3/disable"
 
 	"github.com/openimsdk/open-im-server/v3/pkg/common/config"
+	awsirsa "github.com/openimsdk/open-im-server/v3/pkg/common/storage/awsirsa"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/storage/cache/redis"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/storage/database/mgo"
 	"github.com/openimsdk/open-im-server/v3/pkg/localcache"
-	"github.com/openimsdk/tools/s3/aws"
 	"github.com/openimsdk/tools/s3/kodo"
 
 	"google.golang.org/grpc"
@@ -96,7 +96,14 @@ func Start(ctx context.Context, config *Config, client discovery.SvcDiscoveryReg
 	case "kodo":
 		o, err = kodo.NewKodo(*config.RpcConfig.Object.Kodo.Build())
 	case "aws":
-		o, err = aws.NewAws(*config.RpcConfig.Object.Aws.Build())
+		awsConfig := config.RpcConfig.Object.Aws.Build()
+		o, err = awsirsa.NewAws(awsirsa.Config{
+			Region:          awsConfig.Region,
+			Bucket:          awsConfig.Bucket,
+			AccessKeyID:     awsConfig.AccessKeyID,
+			SecretAccessKey: awsConfig.SecretAccessKey,
+			SessionToken:    awsConfig.SessionToken,
+		})
 	case "":
 		o = disable.NewDisable()
 	default:
