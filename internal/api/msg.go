@@ -163,6 +163,10 @@ func (m *MessageApi) RevokeMsg(c *gin.Context) {
 	a2r.Call(c, msg.MsgClient.RevokeMsg, m.Client)
 }
 
+func (m *MessageApi) ModifyMessage(c *gin.Context) {
+	a2r.Call(c, msg.MsgClient.ModifyMessage, m.Client)
+}
+
 func (m *MessageApi) MarkMsgsAsRead(c *gin.Context) {
 	a2r.Call(c, msg.MsgClient.MarkMsgsAsRead, m.Client)
 }

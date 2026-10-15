@@ -17,6 +17,7 @@ type PaymentMessageV1 struct {
 	ToUserID       string `json:"to_user_id"`
 	PaymentType    string `json:"payment_type"`
 	Status         string `json:"status"`
+	Reason         string `json:"reason,omitempty"`
 	ChainID        string `json:"chain_id"`
 	TransactionID  string `json:"transaction_id"`
 	BlockID        string `json:"block_id,omitempty"`

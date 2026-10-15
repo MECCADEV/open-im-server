@@ -52,6 +52,8 @@ const (
 type CommonMsgDatabase interface {
 	// RevokeMsg revokes a message in a conversation.
 	RevokeMsg(ctx context.Context, conversationID string, seq int64, revoke *model.RevokeModel) error
+	// ModifyMsg replaces persisted content and invalidates the message cache.
+	ModifyMsg(ctx context.Context, conversationID string, seq int64, message *model.MsgDataModel) error
 	// MarkSingleChatMsgsAsRead marks messages as read for a single chat by sequence numbers.
 	MarkSingleChatMsgsAsRead(ctx context.Context, userID string, conversationID string, seqs []int64) error
 	// GetMsgBySeqsRange retrieves messages from MongoDB by a range of sequence numbers.
@@ -234,6 +236,16 @@ func (db *commonMsgDatabase) batchInsertBlock(ctx context.Context, conversationI
 
 func (db *commonMsgDatabase) RevokeMsg(ctx context.Context, conversationID string, seq int64, revoke *model.RevokeModel) error {
 	if err := db.batchInsertBlock(ctx, conversationID, []any{revoke}, updateKeyRevoke, seq); err != nil {
+		return err
+	}
+	return db.msgCache.DelMessageBySeqs(ctx, conversationID, []int64{seq})
+}
+
+func (db *commonMsgDatabase) ModifyMsg(ctx context.Context, conversationID string, seq int64, message *model.MsgDataModel) error {
+	if message == nil || message.Seq != seq {
+		return errs.ErrArgs.WrapMsg("message sequence is invalid")
+	}
+	if err := db.batchInsertBlock(ctx, conversationID, []any{message}, updateKeyMsg, seq); err != nil {
 		return err
 	}
 	return db.msgCache.DelMessageBySeqs(ctx, conversationID, []int64{seq})

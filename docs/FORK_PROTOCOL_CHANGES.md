@@ -89,3 +89,47 @@ pingmessenger.payment.v1`). The platform emits `payment.created` and
 replace an older message only when the version increases. OpenIM does not own
 the ledger or blockchain transaction state, and PingPay-user remains behind the
 platform's authenticated watcher boundary.
+
+The optional `reason` field is `timeout` when the platform's one-second stale
+payment sweep marks a pending transaction as terminal `failed`. The platform
+also sends that same versioned update through its participant-filtered payment
+WebSocket to both `from_user_id` and `to_user_id`; the OpenIM custom message is
+the durable chat projection and the HTTP sync endpoint remains the replay
+source.
+
+## Message edit endpoint
+
+The PingMessenger fork exposes this endpoint:
+
+```text
+POST /msg/modify_message
+Authorization: <OpenIM admin token>
+
+{
+  "conversationID": "conversation-id",
+  "seq": 42,
+  "userID": "original-sender-openim-id",
+  "oldContent": "<exact stored custom-message JSON>",
+  "newContent": "<validated custom-message JSON>"
+}
+```
+
+The route calls the `msg.ModifyMessage` RPC after validating that the old
+content matches and the target message is eligible for modification. The fork
+persists the replacement content, invalidates the message cache, and emits
+the protocol-native `ModifyMessageNotification` frame with conversation ID,
+sequence, new content, modifier, modification time, and modification count.
+OpenIM SDK clients consume that notification and update the local message.
+A normal user token is allowed only when the caller is the original sender;
+an admin token may edit platform-generated messages subject to platform
+authorization. Sender, receiver, conversation, sequence, and message type
+are not mutable through this route.
+
+The route is included in the forked API and is only reachable through the
+existing OpenIM admin/user-token middleware. `oldContent` is a compare-and-
+swap guard; failed comparisons do not modify the stored message.
+
+The platform must apply any product-specific edit window before calling this
+route; the fork deliberately has no dependency on PingMessenger's timer
+table. The `oldContent` field is a compare-and-swap guard; failed comparisons
+do not modify the stored message.
