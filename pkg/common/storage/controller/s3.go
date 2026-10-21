@@ -19,11 +19,13 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/openimsdk/open-im-server/v3/pkg/authverify"
 	redisCache "github.com/openimsdk/open-im-server/v3/pkg/common/storage/cache/redis"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/storage/database"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/storage/model"
 
 	"github.com/openimsdk/open-im-server/v3/pkg/common/storage/cache"
+	"github.com/openimsdk/tools/mcontext"
 	"github.com/openimsdk/tools/s3"
 	"github.com/openimsdk/tools/s3/cont"
 	"github.com/redis/go-redis/v9"
@@ -93,6 +95,15 @@ func (s *s3Database) AccessURL(ctx context.Context, name string, expire time.Dur
 	obj, err := s.cache.GetName(ctx, s.s3.Engine(), name)
 	if err != nil {
 		return time.Time{}, "", err
+	}
+	// Authenticated object/access_url calls may only sign the caller's own
+	// object (or an admin may sign any object). The unauthenticated object
+	// redirect remains a bearer-link path so recipients can open attachments
+	// embedded in messages without needing the sender's token.
+	if mcontext.GetOpUserID(ctx) != "" {
+		if err := authverify.CheckAccess(ctx, obj.UserID); err != nil {
+			return time.Time{}, "", err
+		}
 	}
 	if opt == nil {
 		opt = &s3.AccessURLOption{}
