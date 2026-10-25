@@ -598,6 +598,47 @@ func TestRedisCoalescerSuppressesUnsequencedReplayAndLearnsEnrichedAliases(t *te
 	}
 }
 
+func TestRedisCoalescerLearnsAliasesBeforeSequenceReplayFilter(t *testing.T) {
+	client := redisTestClient(t)
+	userID, conversationID := uniqueNotificationKey()
+	stateKey, dueKey := notificationKeys(userID, conversationID)
+	t.Cleanup(func() {
+		_ = client.Del(context.Background(), stateKey).Err()
+		_ = client.ZRem(context.Background(), dueKey, stateKey).Err()
+	})
+
+	now := time.UnixMilli(4_800_000)
+	coalescer, err := newNotificationCoalescer(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coalescer.now = func() time.Time { return now }
+	first := pendingNotification{
+		UserID: userID, ConversationID: conversationID, Content: "sequenced",
+		Options: options.Opts{Data: map[string]string{"conversationID": conversationID, "clientMsgID": "client-sequenced", "seq": "10"}},
+	}
+	claim, err := coalescer.schedule(context.Background(), userID, conversationID, 2, first)
+	if err != nil || claim == nil {
+		t.Fatalf("first schedule = (%+v, %v), want immediate claim", claim, err)
+	}
+	if err := coalescer.finish(context.Background(), claim, "sent"); err != nil {
+		t.Fatal(err)
+	}
+
+	enrichedReplay := first
+	enrichedReplay.Options.Data["serverMsgID"] = "server-sequenced"
+	if replay, err := coalescer.schedule(context.Background(), userID, conversationID, 2, enrichedReplay); err != nil || replay != nil {
+		t.Fatalf("sequenced replay = (%+v, %v), want suppression", replay, err)
+	}
+	serverOnlyReplay := pendingNotification{
+		UserID: userID, ConversationID: conversationID, Content: "unsequenced alias replay",
+		Options: options.Opts{Data: map[string]string{"conversationID": conversationID, "serverMsgID": "server-sequenced"}},
+	}
+	if replay, err := coalescer.schedule(context.Background(), userID, conversationID, 2, serverOnlyReplay); err != nil || replay != nil {
+		t.Fatalf("server-only replay after sequenced alias enrichment = (%+v, %v), want suppression", replay, err)
+	}
+}
+
 func TestRedisCoalescerKeepsRecipientFrequencyIndependent(t *testing.T) {
 	client := redisTestClient(t)
 	conversationID := fmt.Sprintf("coalescer-test-conversation-%d", time.Now().UnixNano())

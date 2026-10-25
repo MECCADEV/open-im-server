@@ -104,8 +104,10 @@ Redis-backed regressions exercise both immediate and queued provider-timeout
 paths and prove alerts are not retried before a configured 10-second cap.
 `TestRedisCoalescerSuppressesUnsequencedReplayAndLearnsEnrichedAliases` verifies
 an older unsequenced replay is suppressed after a newer event and that a
-client-ID match can teach a later server-ID alias. These are deterministic
-queue tests, not live FCM acceptance tests. The
+client-ID match can teach a later server-ID alias. A second regression verifies
+that sequence-suppressed enrichment teaches an alias used by a later
+sequence-less replay. These are deterministic queue tests, not live FCM
+acceptance tests. The
 coalescer records the greatest nonzero conversation sequence seen during its
 30-day state lifetime and ignores a replay at or below that sequence. This
 prevents a delayed Kafka replay from replacing a newer pending group preview;
@@ -113,7 +115,8 @@ it does not make provider delivery exactly-once or fence replays after the
 coalescer state expires. The state also keeps the most recent 128 client/server
 message-ID aliases per recipient and conversation; a replay matching either
 alias is suppressed, and a duplicate with newly enriched IDs teaches the
-coalescer the additional alias. This covers unsequenced and mixed-version
+coalescer the additional alias before the sequence/read-watermark early return.
+This covers unsequenced and mixed-version
 replays; an older unsequenced replay after alias eviction can still show again.
 A provider send error is treated as ambiguous acceptance: the
 coalescer records the attempt and schedules a retry no earlier than the

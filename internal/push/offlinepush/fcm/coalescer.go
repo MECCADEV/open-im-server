@@ -68,21 +68,6 @@ local retention = tonumber(ARGV[6])
 local incoming_sequence = ARGV[7]
 local incoming_ids_json = ARGV[8]
 local identity_limit = tonumber(ARGV[9])
-local read_sequence = redis.call('HGET', KEYS[1], 'read_sequence') or ''
-if incoming_sequence ~= '' and read_sequence ~= '' then
-  if string.len(incoming_sequence) < string.len(read_sequence) or
-    (string.len(incoming_sequence) == string.len(read_sequence) and incoming_sequence <= read_sequence) then
-    return {0}
-  end
-end
-local last_sequence = redis.call('HGET', KEYS[1], 'last_sequence') or ''
-if incoming_sequence ~= '' and last_sequence ~= '' then
-  if string.len(incoming_sequence) < string.len(last_sequence) or
-    (string.len(incoming_sequence) == string.len(last_sequence) and incoming_sequence <= last_sequence) then
-    redis.call('PEXPIRE', KEYS[1], retention)
-    return {0}
-  end
-end
 if incoming_ids_json ~= '[]' then
   local incoming_ok, incoming_ids = pcall(cjson.decode, incoming_ids_json)
   if incoming_ok and type(incoming_ids) == 'table' then
@@ -114,6 +99,21 @@ if incoming_ids_json ~= '[]' then
       redis.call('PEXPIRE', KEYS[1], retention)
       return {0}
     end
+  end
+end
+local read_sequence = redis.call('HGET', KEYS[1], 'read_sequence') or ''
+if incoming_sequence ~= '' and read_sequence ~= '' then
+  if string.len(incoming_sequence) < string.len(read_sequence) or
+    (string.len(incoming_sequence) == string.len(read_sequence) and incoming_sequence <= read_sequence) then
+    return {0}
+  end
+end
+local last_sequence = redis.call('HGET', KEYS[1], 'last_sequence') or ''
+if incoming_sequence ~= '' and last_sequence ~= '' then
+  if string.len(incoming_sequence) < string.len(last_sequence) or
+    (string.len(incoming_sequence) == string.len(last_sequence) and incoming_sequence <= last_sequence) then
+    redis.call('PEXPIRE', KEYS[1], retention)
+    return {0}
   end
 end
 -- last_sent_ms is retained as a compatibility alias for deployments that
