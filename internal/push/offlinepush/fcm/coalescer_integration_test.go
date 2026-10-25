@@ -500,6 +500,47 @@ func TestAmbiguousProviderAcknowledgmentHonorsConfiguredFrequency(t *testing.T) 
 	}
 }
 
+func TestImmediateAmbiguousProviderAcknowledgmentHonorsConfiguredFrequency(t *testing.T) {
+	client := redisTestClient(t)
+	userID, conversationID := uniqueNotificationKey()
+	stateKey, dueKey := notificationKeys(userID, conversationID)
+	t.Cleanup(func() {
+		_ = client.Del(context.Background(), stateKey).Err()
+		_ = client.ZRem(context.Background(), dueKey, stateKey).Err()
+	})
+
+	now := time.UnixMilli(4_600_000)
+	coalescer, err := newNotificationCoalescer(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coalescer.now = func() time.Time { return now }
+	settings := notificationprefs.DefaultSettings()
+	settings.MaxUpdateFrequencySeconds = 10
+	sender := &recordingMessageSender{err: fmt.Errorf("provider acknowledgement timed out")}
+	push := &Fcm{
+		fcmMsgCli: sender, cache: notificationTestCache{}, coalescer: coalescer,
+		notificationPreferences: &mutablePreferenceResolver{settings: settings},
+	}
+	options := options.Opts{Data: map[string]string{"conversationID": conversationID, "seq": "21"}}
+	if err := push.Push(context.Background(), []string{userID}, "group", "possibly accepted", &options); err == nil {
+		t.Fatal("ambiguous provider failure should return for queue retry")
+	}
+	if sender.sent == 0 {
+		t.Fatal("expected the provider send attempt")
+	}
+
+	now = now.Add(time.Second)
+	if retry, err := coalescer.claimDue(context.Background()); err != nil || retry != nil {
+		t.Fatalf("immediate retry before configured cap = (%+v, %v), want none", retry, err)
+	}
+	now = now.Add(9 * time.Second)
+	retry, err := coalescer.claimDue(context.Background())
+	if err != nil || retry == nil || retry.payload.Content != "possibly accepted" {
+		t.Fatalf("immediate retry at configured cap = (%+v, %v), want retained preview", retry, err)
+	}
+}
+
 func TestRedisCoalescerKeepsRecipientFrequencyIndependent(t *testing.T) {
 	client := redisTestClient(t)
 	conversationID := fmt.Sprintf("coalescer-test-conversation-%d", time.Now().UnixNano())
