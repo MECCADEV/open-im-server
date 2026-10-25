@@ -61,6 +61,8 @@ jobs:
 
       - name: Modify Server Configuration
         run: |
+          yq e '.rpc.ports = [10088]' -i config/openim-msggateway.yml
+          yq e '.prometheus.ports = [10090]' -i config/openim-msggateway.yml
           yq e '.secret = 123456' -i ${{ env.SHARE_CONFIG_PATH }}
 
       # - name: Get Internal IP Address
@@ -242,6 +244,8 @@ jobs:
         run: |
           yq e '.groupCreated.isSendMsg = true' -i ${{ env.NOTIFICATION_CONFIG_PATH }}
           yq e '.friendApplicationApproved.isSendMsg = true' -i ${{ env.NOTIFICATION_CONFIG_PATH }}
+          yq e '.rpc.ports = [10088]' -i config/openim-msggateway.yml
+          yq e '.prometheus.ports = [10090]' -i config/openim-msggateway.yml
           yq e '.secret = 123456' -i ${{ env.SHARE_CONFIG_PATH }}
 
       - name: Start Server Services
