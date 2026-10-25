@@ -5,3 +5,7 @@ services:
     image: cgr.dev/chainguard/minio@sha256:268d68a2a3b6fc65f905a61f84d7eab6345ce6bff14f551e2b028ec31e6a1341
     # The compose default command already includes the `minio` executable.
     entrypoint: []
+    # CI data is disposable, and the image runs as UID/GID 65532.
+    volumes: !reset []
+    tmpfs:
+      - /data:rw,uid=65532,gid=65532
