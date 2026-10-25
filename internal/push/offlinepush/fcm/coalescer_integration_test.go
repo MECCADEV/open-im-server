@@ -1,0 +1,579 @@
+package fcm
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/openimsdk/open-im-server/v3/internal/notificationstate"
+	"github.com/openimsdk/open-im-server/v3/internal/push/notificationprefs"
+	"github.com/openimsdk/open-im-server/v3/internal/push/offlinepush/options"
+	"github.com/redis/go-redis/v9"
+)
+
+func TestRedisCoalescerLatestWinsAndHonorsFrequency(t *testing.T) {
+	client := redisTestClient(t)
+	userID, conversationID := uniqueNotificationKey()
+	stateKey, dueKey := notificationKeys(userID, conversationID)
+	t.Cleanup(func() {
+		_ = client.Del(context.Background(), stateKey).Err()
+		_ = client.ZRem(context.Background(), dueKey, stateKey).Err()
+	})
+
+	now := time.UnixMilli(1_000_000)
+	coalescer, _ := newNotificationCoalescer(client)
+	coalescer.now = func() time.Time { return now }
+	first := pendingNotification{UserID: userID, ConversationID: conversationID, Content: "first", Options: options.Opts{Data: map[string]string{"conversationID": conversationID}}}
+	claim, err := coalescer.schedule(context.Background(), userID, conversationID, 2, first)
+	if err != nil || claim == nil || claim.payload.Content != "first" {
+		t.Fatalf("first schedule = (%+v, %v), want immediate claim", claim, err)
+	}
+	latest := first
+	latest.Content = "latest"
+	queued, err := coalescer.schedule(context.Background(), userID, conversationID, 2, latest)
+	if err != nil || queued != nil {
+		t.Fatalf("cooldown schedule = (%+v, %v), want queued", queued, err)
+	}
+	if err := coalescer.finish(context.Background(), claim, "sent"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := coalescer.claimDue(context.Background()); err != nil || got != nil {
+		t.Fatalf("claimed before frequency boundary = (%+v, %v), want none", got, err)
+	}
+	now = now.Add(2 * time.Second)
+	flush, err := coalescer.claimDue(context.Background())
+	if err != nil || flush == nil || flush.payload.Content != "latest" {
+		t.Fatalf("due flush = (%+v, %v), want latest payload", flush, err)
+	}
+	newer := latest
+	newer.Content = "arrived-during-flush"
+	if queued, err := coalescer.schedule(context.Background(), userID, conversationID, 2, newer); err != nil || queued != nil {
+		t.Fatalf("message during flush = (%+v, %v), want queued", queued, err)
+	}
+	if err := coalescer.finish(context.Background(), flush, "sent"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * time.Second)
+	flush, err = coalescer.claimDue(context.Background())
+	if err != nil || flush == nil || flush.payload.Content != "arrived-during-flush" {
+		t.Fatalf("post-flush pending = (%+v, %v), want newest payload", flush, err)
+	}
+	if err := coalescer.finish(context.Background(), flush, "sent"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRedisCoalescerReplayDoesNotRegressPendingSequence(t *testing.T) {
+	client := redisTestClient(t)
+	userID, conversationID := uniqueNotificationKey()
+	stateKey, dueKey := notificationKeys(userID, conversationID)
+	t.Cleanup(func() {
+		_ = client.Del(context.Background(), stateKey).Err()
+		_ = client.ZRem(context.Background(), dueKey, stateKey).Err()
+	})
+
+	now := time.UnixMilli(2_000_000)
+	coalescer, _ := newNotificationCoalescer(client)
+	coalescer.now = func() time.Time { return now }
+	item := pendingNotification{
+		UserID: userID, ConversationID: conversationID, Content: "message-100",
+		Options: options.Opts{Data: map[string]string{"conversationID": conversationID, "seq": "100"}},
+	}
+	first, err := coalescer.schedule(context.Background(), userID, conversationID, 2, item)
+	if err != nil || first == nil {
+		t.Fatalf("first sequence schedule = (%+v, %v), want immediate claim", first, err)
+	}
+
+	newer := item
+	newer.Content = "message-101"
+	newer.Options.Data = map[string]string{"conversationID": conversationID, "seq": "101"}
+	if queued, err := coalescer.schedule(context.Background(), userID, conversationID, 2, newer); err != nil || queued != nil {
+		t.Fatalf("newer sequence schedule = (%+v, %v), want queued", queued, err)
+	}
+
+	if queued, err := coalescer.schedule(context.Background(), userID, conversationID, 2, item); err != nil || queued != nil {
+		t.Fatalf("replayed older sequence = (%+v, %v), want ignored", queued, err)
+	}
+	if err := coalescer.finish(context.Background(), first, "sent"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * time.Second)
+	flush, err := coalescer.claimDue(context.Background())
+	if err != nil || flush == nil || flush.payload.Content != "message-101" {
+		t.Fatalf("due flush = (%+v, %v), want newest message, not replay", flush, err)
+	}
+	if err := coalescer.finish(context.Background(), flush, "sent"); err != nil {
+		t.Fatal(err)
+	}
+	if queued, err := coalescer.schedule(context.Background(), userID, conversationID, 2, newer); err != nil || queued != nil {
+		t.Fatalf("replayed delivered sequence = (%+v, %v), want ignored", queued, err)
+	}
+}
+
+func TestReadWatermarkCancelsQueuedNotificationAndNeverRegresses(t *testing.T) {
+	client := redisTestClient(t)
+	userID, conversationID := uniqueNotificationKey()
+	stateKey, dueKey := notificationKeys(userID, conversationID)
+	t.Cleanup(func() {
+		_ = client.Del(context.Background(), stateKey).Err()
+		_ = client.ZRem(context.Background(), dueKey, stateKey).Err()
+	})
+	now := time.UnixMilli(3_000_000)
+	coalescer, _ := newNotificationCoalescer(client)
+	coalescer.now = func() time.Time { return now }
+	first := pendingNotification{
+		UserID: userID, ConversationID: conversationID, Content: "message-10",
+		Options: options.Opts{Data: map[string]string{"conversationID": conversationID, "seq": "10"}},
+	}
+	claim, err := coalescer.schedule(context.Background(), userID, conversationID, 2, first)
+	if err != nil || claim == nil {
+		t.Fatalf("first notification = (%+v, %v), want immediate claim", claim, err)
+	}
+	if err := coalescer.finish(context.Background(), claim, "sent"); err != nil {
+		t.Fatal(err)
+	}
+	queued := first
+	queued.Content = "message-11"
+	queued.Options.Data["seq"] = "11"
+	if claim, err := coalescer.schedule(context.Background(), userID, conversationID, 2, queued); err != nil || claim != nil {
+		t.Fatalf("cooldown notification = (%+v, %v), want queued", claim, err)
+	}
+
+	watermarker := notificationstate.NewWatermarker(client)
+	if _, err := watermarker.AdvanceRead(context.Background(), userID, conversationID, 11, notificationstate.RetentionMillis); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := watermarker.AdvanceRead(context.Background(), userID, conversationID, 8, notificationstate.RetentionMillis); err != nil {
+		t.Fatal(err)
+	}
+	if watermark, err := watermarker.ReadSequence(context.Background(), userID, conversationID); err != nil || watermark != 11 {
+		t.Fatalf("read watermark = (%d, %v), want monotonic 11", watermark, err)
+	}
+	now = now.Add(10 * time.Second)
+	if claim, err := coalescer.claimDue(context.Background()); err != nil || claim != nil {
+		t.Fatalf("claim after read = (%+v, %v), want no stale notification", claim, err)
+	}
+	newer := queued
+	newer.Content = "message-12"
+	newer.Options.Data["seq"] = "12"
+	if claim, err := coalescer.schedule(context.Background(), userID, conversationID, 2, newer); err != nil || claim == nil {
+		t.Fatalf("unread newer notification = (%+v, %v), want immediate claim", claim, err)
+	}
+}
+
+func TestPushWithoutResolverUsesDefaultCapAndSuppressesReplay(t *testing.T) {
+	client := redisTestClient(t)
+	userID, conversationID := uniqueNotificationKey()
+	stateKey, dueKey := notificationKeys(userID, conversationID)
+	t.Cleanup(func() {
+		_ = client.Del(context.Background(), stateKey).Err()
+		_ = client.ZRem(context.Background(), dueKey, stateKey).Err()
+	})
+
+	now := time.UnixMilli(2_500_000)
+	coalescer, err := newNotificationCoalescer(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coalescer.now = func() time.Time { return now }
+	sender := &recordingMessageSender{}
+	push := &Fcm{fcmMsgCli: sender, cache: notificationTestCache{}, coalescer: coalescer}
+	makeOptions := func(sequence string) *options.Opts {
+		return &options.Opts{Data: map[string]string{
+			"conversationID": conversationID,
+			"seq":            sequence,
+		}}
+	}
+
+	if err := push.Push(context.Background(), []string{userID}, "first", "message 500", makeOptions("500")); err != nil {
+		t.Fatal(err)
+	}
+	if sender.sent != len(Terminal) {
+		t.Fatalf("first send count = %d, want %d terminal deliveries", sender.sent, len(Terminal))
+	}
+	if err := push.Push(context.Background(), []string{userID}, "replay", "message 500", makeOptions("500")); err != nil {
+		t.Fatal(err)
+	}
+	if err := push.Push(context.Background(), []string{userID}, "newer", "message 501", makeOptions("501")); err != nil {
+		t.Fatal(err)
+	}
+	if sender.sent != len(Terminal) {
+		t.Fatalf("replay/cooldown send count = %d, want unchanged %d", sender.sent, len(Terminal))
+	}
+
+	now = now.Add(2 * time.Second)
+	claim, err := coalescer.claimDue(context.Background())
+	if err != nil || claim == nil || claim.payload.Content != "message 501" {
+		t.Fatalf("default-frequency pending claim = (%+v, %v), want latest message 501", claim, err)
+	}
+	if err := coalescer.finish(context.Background(), claim, "sent"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFailOpenResolverFailureStillUsesDefaultCapAndReplayFilter(t *testing.T) {
+	client := redisTestClient(t)
+	userID, conversationID := uniqueNotificationKey()
+	stateKey, dueKey := notificationKeys(userID, conversationID)
+	t.Cleanup(func() {
+		_ = client.Del(context.Background(), stateKey).Err()
+		_ = client.ZRem(context.Background(), dueKey, stateKey).Err()
+	})
+
+	now := time.UnixMilli(2_750_000)
+	coalescer, err := newNotificationCoalescer(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coalescer.now = func() time.Time { return now }
+	sender := &recordingMessageSender{}
+	push := &Fcm{
+		fcmMsgCli: sender,
+		cache:     notificationTestCache{},
+		notificationPreferences: failingPreferenceResolver{
+			err: errors.New("resolver unavailable"),
+		},
+		notificationPreferencesMode: "fail-open",
+		coalescer:                   coalescer,
+	}
+	makeOptions := func(sequence string) *options.Opts {
+		return &options.Opts{Data: map[string]string{
+			"conversationID": conversationID,
+			"seq":            sequence,
+		}}
+	}
+
+	if err := push.Push(context.Background(), []string{userID}, "first", "message 500", makeOptions("500")); err != nil {
+		t.Fatal(err)
+	}
+	wantInitialSends := len(Terminal)
+	if sender.sent != wantInitialSends {
+		t.Fatalf("first send count = %d, want %d terminal deliveries", sender.sent, wantInitialSends)
+	}
+	if err := push.Push(context.Background(), []string{userID}, "replay", "message 500", makeOptions("500")); err != nil {
+		t.Fatal(err)
+	}
+	if err := push.Push(context.Background(), []string{userID}, "newer", "message 501", makeOptions("501")); err != nil {
+		t.Fatal(err)
+	}
+	if sender.sent != wantInitialSends {
+		t.Fatalf("resolver outage bypassed coalescing: sends=%d, want %d", sender.sent, wantInitialSends)
+	}
+
+	now = now.Add(2 * time.Second)
+	claim, err := coalescer.claimDue(context.Background())
+	if err != nil || claim == nil || claim.payload.Content != "message 501" {
+		t.Fatalf("default-frequency pending claim = (%+v, %v), want latest message 501", claim, err)
+	}
+	push.deliverPendingNotification(context.Background(), claim)
+	if sender.sent != wantInitialSends+len(Terminal) {
+		t.Fatalf("pending delivery count = %d, want %d", sender.sent, wantInitialSends+len(Terminal))
+	}
+}
+
+type failOncePreferenceResolver struct {
+	calls    int
+	settings notificationprefs.EffectiveSettings
+}
+
+func (r *failOncePreferenceResolver) ResolveWithRetry(_ context.Context, userIDs []string, _ string) (map[string]notificationprefs.EffectiveSettings, error) {
+	r.calls++
+	if r.calls == 1 {
+		return nil, errors.New("resolver unavailable")
+	}
+	resolved := make(map[string]notificationprefs.EffectiveSettings, len(userIDs))
+	for _, userID := range userIDs {
+		resolved[userID] = r.settings
+	}
+	return resolved, nil
+}
+
+func TestFailClosedResolverFailureRequeuesPendingPreview(t *testing.T) {
+	client := redisTestClient(t)
+	userID, conversationID := uniqueNotificationKey()
+	stateKey, dueKey := notificationKeys(userID, conversationID)
+	t.Cleanup(func() {
+		_ = client.Del(context.Background(), stateKey).Err()
+		_ = client.ZRem(context.Background(), dueKey, stateKey).Err()
+	})
+
+	now := time.UnixMilli(2_900_000)
+	coalescer, err := newNotificationCoalescer(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coalescer.now = func() time.Time { return now }
+	item := pendingNotification{
+		UserID: userID, ConversationID: conversationID, Title: "group",
+		Content: "first", Options: options.Opts{Data: map[string]string{"conversationID": conversationID, "seq": "10"}},
+	}
+	first, err := coalescer.schedule(context.Background(), userID, conversationID, 2, item)
+	if err != nil || first == nil {
+		t.Fatalf("first schedule = (%+v, %v), want immediate claim", first, err)
+	}
+	if err := coalescer.finish(context.Background(), first, "sent"); err != nil {
+		t.Fatal(err)
+	}
+	item.Content = "latest"
+	item.Options.Data["seq"] = "11"
+	queued, err := coalescer.schedule(context.Background(), userID, conversationID, 2, item)
+	if err != nil || queued != nil {
+		t.Fatalf("cooldown schedule = (%+v, %v), want latest preview queued", queued, err)
+	}
+
+	now = now.Add(2 * time.Second)
+	claim, err := coalescer.claimDue(context.Background())
+	if err != nil || claim == nil || claim.payload.Content != "latest" {
+		t.Fatalf("due claim = (%+v, %v), want latest preview", claim, err)
+	}
+	resolver := &failOncePreferenceResolver{settings: notificationprefs.DefaultSettings()}
+	sender := &recordingMessageSender{}
+	push := &Fcm{
+		fcmMsgCli: sender, cache: notificationTestCache{},
+		notificationPreferences: resolver, notificationPreferencesMode: "fail-closed",
+		coalescer: coalescer,
+	}
+	push.deliverPendingNotification(context.Background(), claim)
+	if sender.sent != 0 {
+		t.Fatalf("resolver outage sent %d alerts, want none in fail-closed mode", sender.sent)
+	}
+
+	now = now.Add(999 * time.Millisecond)
+	if retry, err := coalescer.claimDue(context.Background()); err != nil || retry != nil {
+		t.Fatalf("early retry claim = (%+v, %v), want backoff to defer it", retry, err)
+	}
+	now = now.Add(time.Millisecond)
+	retry, err := coalescer.claimDue(context.Background())
+	if err != nil || retry == nil || retry.payload.Content != "latest" {
+		t.Fatalf("recovered claim = (%+v, %v), want preserved latest preview", retry, err)
+	}
+	push.deliverPendingNotification(context.Background(), retry)
+	if resolver.calls != 3 { // flush check, then push's per-recipient authorization check
+		t.Fatalf("resolver calls = %d, want initial failure and two recovery checks", resolver.calls)
+	}
+	if sender.sent != len(Terminal) {
+		t.Fatalf("recovery send count = %d, want %d terminal deliveries", sender.sent, len(Terminal))
+	}
+	if pending, err := coalescer.claimDue(context.Background()); err != nil || pending != nil {
+		t.Fatalf("post-recovery claim = (%+v, %v), want no duplicate pending preview", pending, err)
+	}
+}
+
+func TestRedisCoalescerAppliesLongerFrequencyBeforeFlush(t *testing.T) {
+	client := redisTestClient(t)
+	userID, conversationID := uniqueNotificationKey()
+	stateKey, dueKey := notificationKeys(userID, conversationID)
+	t.Cleanup(func() {
+		_ = client.Del(context.Background(), stateKey).Err()
+		_ = client.ZRem(context.Background(), dueKey, stateKey).Err()
+	})
+
+	now := time.UnixMilli(3_000_000)
+	coalescer, _ := newNotificationCoalescer(client)
+	coalescer.now = func() time.Time { return now }
+	item := pendingNotification{UserID: userID, ConversationID: conversationID, Content: "frequency-change"}
+	claim, err := coalescer.schedule(context.Background(), userID, conversationID, 2, item)
+	if err != nil || claim == nil {
+		t.Fatalf("initial schedule = (%+v, %v)", claim, err)
+	}
+	if err := coalescer.finish(context.Background(), claim, "sent"); err != nil {
+		t.Fatal(err)
+	}
+	if queued, err := coalescer.schedule(context.Background(), userID, conversationID, 2, item); err != nil || queued != nil {
+		t.Fatalf("cooldown schedule = (%+v, %v)", queued, err)
+	}
+	now = now.Add(2 * time.Second)
+	claim, err = coalescer.claimDue(context.Background())
+	if err != nil || claim == nil {
+		t.Fatalf("claim at old deadline = (%+v, %v)", claim, err)
+	}
+	deferred, err := coalescer.deferForFrequency(context.Background(), claim, 10)
+	if err != nil || !deferred {
+		t.Fatalf("longer frequency defer = (%t, %v), want true", deferred, err)
+	}
+	if got, err := coalescer.claimDue(context.Background()); err != nil || got != nil {
+		t.Fatalf("claimed before updated deadline = (%+v, %v), want none", got, err)
+	}
+	now = now.Add(8 * time.Second)
+	claim, err = coalescer.claimDue(context.Background())
+	if err != nil || claim == nil {
+		t.Fatalf("claim at updated deadline = (%+v, %v)", claim, err)
+	}
+	if err := coalescer.finish(context.Background(), claim, "sent"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRedisCoalescerRetryBackoffKeepsOnlyLatestFailedMessage(t *testing.T) {
+	client := redisTestClient(t)
+	userID, conversationID := uniqueNotificationKey()
+	stateKey, dueKey := notificationKeys(userID, conversationID)
+	t.Cleanup(func() {
+		_ = client.Del(context.Background(), stateKey).Err()
+		_ = client.ZRem(context.Background(), dueKey, stateKey).Err()
+	})
+
+	now := time.UnixMilli(4_000_000)
+	coalescer, _ := newNotificationCoalescer(client)
+	coalescer.now = func() time.Time { return now }
+	first := pendingNotification{UserID: userID, ConversationID: conversationID, Content: "failed"}
+	claim, err := coalescer.schedule(context.Background(), userID, conversationID, 2, first)
+	if err != nil || claim == nil {
+		t.Fatalf("initial schedule = (%+v, %v)", claim, err)
+	}
+	if err := coalescer.finish(context.Background(), claim, "retry"); err != nil {
+		t.Fatal(err)
+	}
+	latest := first
+	latest.Content = "latest-after-failure"
+	if claim, err := coalescer.schedule(context.Background(), userID, conversationID, 2, latest); err != nil || claim != nil {
+		t.Fatalf("schedule during retry backoff = (%+v, %v), want queued", claim, err)
+	}
+	if claim, err := coalescer.claimDue(context.Background()); err != nil || claim != nil {
+		t.Fatalf("claim before retry deadline = (%+v, %v), want none", claim, err)
+	}
+	now = now.Add(time.Second)
+	claim, err = coalescer.claimDue(context.Background())
+	if err != nil || claim == nil || claim.payload.Content != "latest-after-failure" {
+		t.Fatalf("retry claim = (%+v, %v), want latest pending payload", claim, err)
+	}
+	if err := coalescer.finish(context.Background(), claim, "sent"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRedisCoalescerKeepsRecipientFrequencyIndependent(t *testing.T) {
+	client := redisTestClient(t)
+	conversationID := fmt.Sprintf("coalescer-test-conversation-%d", time.Now().UnixNano())
+	fastUser := "coalescer-fast-" + conversationID
+	slowUser := "coalescer-slow-" + conversationID
+	fastState, fastDue := notificationKeys(fastUser, conversationID)
+	slowState, slowDue := notificationKeys(slowUser, conversationID)
+	t.Cleanup(func() {
+		_ = client.Del(context.Background(), fastState, slowState).Err()
+		_ = client.ZRem(context.Background(), fastDue, fastState).Err()
+		_ = client.ZRem(context.Background(), slowDue, slowState).Err()
+	})
+	now := time.UnixMilli(5_000_000)
+	coalescer, _ := newNotificationCoalescer(client)
+	coalescer.now = func() time.Time { return now }
+	for _, recipient := range []struct {
+		user string
+		freq int
+	}{{fastUser, 2}, {slowUser, 5}} {
+		item := pendingNotification{UserID: recipient.user, ConversationID: conversationID, Content: "initial"}
+		claim, err := coalescer.schedule(context.Background(), recipient.user, conversationID, recipient.freq, item)
+		if err != nil || claim == nil {
+			t.Fatalf("initial schedule for %s = (%+v, %v)", recipient.user, claim, err)
+		}
+		if err := coalescer.finish(context.Background(), claim, "sent"); err != nil {
+			t.Fatal(err)
+		}
+		item.Content = "pending"
+		if claim, err := coalescer.schedule(context.Background(), recipient.user, conversationID, recipient.freq, item); err != nil || claim != nil {
+			t.Fatalf("cooldown schedule for %s = (%+v, %v)", recipient.user, claim, err)
+		}
+	}
+	now = now.Add(2 * time.Second)
+	claim, err := coalescer.claimDue(context.Background())
+	if err != nil || claim == nil || claim.payload.UserID != fastUser {
+		t.Fatalf("fast recipient claim = (%+v, %v), want %s", claim, err, fastUser)
+	}
+	if err := coalescer.finish(context.Background(), claim, "sent"); err != nil {
+		t.Fatal(err)
+	}
+	if claim, err := coalescer.claimDue(context.Background()); err != nil || claim != nil {
+		t.Fatalf("slow recipient claimed before its cap = (%+v, %v), want none", claim, err)
+	}
+	now = now.Add(3 * time.Second)
+	claim, err = coalescer.claimDue(context.Background())
+	if err != nil || claim == nil || claim.payload.UserID != slowUser {
+		t.Fatalf("slow recipient claim = (%+v, %v), want %s", claim, err, slowUser)
+	}
+	if err := coalescer.finish(context.Background(), claim, "sent"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRedisCoalescerLeaseRecoversAfterRestartAndClaimsOnce(t *testing.T) {
+	client := redisTestClient(t)
+	userID, conversationID := uniqueNotificationKey()
+	stateKey, dueKey := notificationKeys(userID, conversationID)
+	t.Cleanup(func() {
+		_ = client.Del(context.Background(), stateKey).Err()
+		_ = client.ZRem(context.Background(), dueKey, stateKey).Err()
+	})
+
+	now := time.UnixMilli(2_000_000)
+	coalescerA, _ := newNotificationCoalescer(client)
+	coalescerB, _ := newNotificationCoalescer(client)
+	coalescerA.now = func() time.Time { return now }
+	coalescerB.now = func() time.Time { return now }
+	payload := pendingNotification{UserID: userID, ConversationID: conversationID, Content: "persisted"}
+	claim, err := coalescerA.schedule(context.Background(), userID, conversationID, 5, payload)
+	if err != nil || claim == nil {
+		t.Fatalf("initial schedule = (%+v, %v), want immediate claim", claim, err)
+	}
+
+	// Simulate process death before finalizing the first claim. Once its lease
+	// expires, independently recreated workers race to reclaim the same record.
+	now = now.Add(coalescerLease + time.Millisecond)
+	var wg sync.WaitGroup
+	results := make(chan *notificationClaim, 2)
+	errCh := make(chan error, 2)
+	for _, worker := range []*notificationCoalescer{coalescerA, coalescerB} {
+		wg.Add(1)
+		go func(worker *notificationCoalescer) {
+			defer wg.Done()
+			got, err := worker.claimDue(context.Background())
+			results <- got
+			errCh <- err
+		}(worker)
+	}
+	wg.Wait()
+	close(results)
+	close(errCh)
+	var recovered *notificationClaim
+	count := 0
+	for got := range results {
+		if got != nil {
+			recovered = got
+			count++
+		}
+	}
+	for err := range errCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if count != 1 || recovered == nil || recovered.payload.Content != "persisted" {
+		t.Fatalf("recovered claims = %d, claim=%+v; want exactly one persisted claim", count, recovered)
+	}
+}
+
+func redisTestClient(t *testing.T) *redis.Client {
+	t.Helper()
+	address := os.Getenv("REDIS_TEST_URL")
+	if address == "" {
+		t.Skip("set REDIS_TEST_URL to run Redis Lua integration tests")
+	}
+	options, err := redis.ParseURL(address)
+	if err != nil {
+		t.Fatalf("parse REDIS_TEST_URL: %v", err)
+	}
+	client := redis.NewClient(options)
+	t.Cleanup(func() { _ = client.Close() })
+	if err := client.Ping(context.Background()).Err(); err != nil {
+		t.Fatalf("connect to REDIS_TEST_URL: %v", err)
+	}
+	return client
+}
+
+func uniqueNotificationKey() (string, string) {
+	identity := fmt.Sprintf("%d", time.Now().UnixNano())
+	return "coalescer-test-user-" + identity, "coalescer-test-conversation-" + identity
+}

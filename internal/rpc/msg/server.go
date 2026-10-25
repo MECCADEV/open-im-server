@@ -16,6 +16,7 @@ package msg
 
 import (
 	"context"
+	"time"
 
 	"google.golang.org/grpc"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/openimsdk/open-im-server/v3/pkg/mqbuild"
 	"github.com/openimsdk/open-im-server/v3/pkg/rpcli"
 
+	"github.com/openimsdk/open-im-server/v3/internal/notificationstate"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/config"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/storage/cache/redis"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/storage/controller"
@@ -35,6 +37,7 @@ import (
 	"github.com/openimsdk/protocol/msg"
 	"github.com/openimsdk/protocol/sdkws"
 	"github.com/openimsdk/tools/discovery"
+	"github.com/openimsdk/tools/log"
 )
 
 type MessageInterceptorFunc func(ctx context.Context, globalConfig *Config, req *msg.SendMsgReq) (*sdkws.MsgData, error)
@@ -70,7 +73,12 @@ type msgServer struct {
 	webhookClient          *webhook.Client
 	conversationClient     *rpcli.ConversationClient
 
-	adminUserIDs []string
+	adminUserIDs                []string
+	notificationReadWatermarker notificationReadAdvancer
+}
+
+type notificationReadAdvancer interface {
+	AdvanceRead(context.Context, string, string, int64, int64) (int64, error)
 }
 
 func (m *msgServer) addInterceptorHandler(interceptorFunc ...MessageInterceptorFunc) {
@@ -97,6 +105,10 @@ func Start(ctx context.Context, config *Config, client discovery.SvcDiscoveryReg
 		return err
 	}
 	msgDocModel, err := mgo.NewMsgMongo(mgocli.GetDB())
+	if err != nil {
+		return err
+	}
+	msgSendOutbox, err := mgo.NewMsgSendOutboxMongo(mgocli.GetDB())
 	if err != nil {
 		return err
 	}
@@ -128,26 +140,43 @@ func Start(ctx context.Context, config *Config, client discovery.SvcDiscoveryReg
 		return err
 	}
 	conversationClient := rpcli.NewConversationClient(conversationConn)
-	msgDatabase := controller.NewCommonMsgDatabase(msgDocModel, msgModel, seqUserCache, seqConversationCache, redisProducer)
+	msgDatabase := controller.NewCommonMsgDatabase(msgDocModel, msgSendOutbox, msgModel, seqUserCache, seqConversationCache, redisProducer)
 	s := &msgServer{
-		MsgDatabase:            msgDatabase,
-		RegisterCenter:         client,
-		UserLocalCache:         rpccache.NewUserLocalCache(rpcli.NewUserClient(userConn), &config.LocalCacheConfig, rdb),
-		GroupLocalCache:        rpccache.NewGroupLocalCache(rpcli.NewGroupClient(groupConn), &config.LocalCacheConfig, rdb),
-		ConversationLocalCache: rpccache.NewConversationLocalCache(conversationClient, &config.LocalCacheConfig, rdb),
-		FriendLocalCache:       rpccache.NewFriendLocalCache(rpcli.NewRelationClient(friendConn), &config.LocalCacheConfig, rdb),
-		config:                 config,
-		webhookClient:          webhook.NewWebhookClientForConfig(config.WebhooksConfig),
-		conversationClient:     conversationClient,
-		adminUserIDs:           config.Share.IMAdminUser.UserIDs,
+		MsgDatabase:                 msgDatabase,
+		RegisterCenter:              client,
+		UserLocalCache:              rpccache.NewUserLocalCache(rpcli.NewUserClient(userConn), &config.LocalCacheConfig, rdb),
+		GroupLocalCache:             rpccache.NewGroupLocalCache(rpcli.NewGroupClient(groupConn), &config.LocalCacheConfig, rdb),
+		ConversationLocalCache:      rpccache.NewConversationLocalCache(conversationClient, &config.LocalCacheConfig, rdb),
+		FriendLocalCache:            rpccache.NewFriendLocalCache(rpcli.NewRelationClient(friendConn), &config.LocalCacheConfig, rdb),
+		config:                      config,
+		webhookClient:               webhook.NewWebhookClientForConfig(config.WebhooksConfig),
+		conversationClient:          conversationClient,
+		adminUserIDs:                config.Share.IMAdminUser.UserIDs,
+		notificationReadWatermarker: notificationstate.NewWatermarker(rdb),
 	}
 
 	s.notificationSender = notification.NewNotificationSender(&config.NotificationConfig, notification.WithLocalSendMsg(s.SendMsg))
 	s.msgNotificationSender = NewMsgNotificationSender(config, notification.WithLocalSendMsg(s.SendMsg))
 
 	msg.RegisterMsgServer(server, s)
+	go s.resumePendingSends(ctx)
 
 	return nil
+}
+
+func (m *msgServer) resumePendingSends(ctx context.Context) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		if err := m.MsgDatabase.PublishPendingSends(ctx, 100); err != nil && ctx.Err() == nil {
+			log.ZWarn(ctx, "resume pending message sends failed", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func (m *msgServer) conversationAndGetRecvID(conversation *conversation.Conversation, userID string) string {

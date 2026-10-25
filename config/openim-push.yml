@@ -60,4 +60,15 @@ iosPush:
   badgeCount: true
   production: false
 
+# Optional private Platform resolver. When unset, FCM uses Platform's
+# documented defaults (all/default/2s) for Redis coalescing; per-user overrides
+# require the resolver. Inject serviceToken through the deployment secret
+# manager; never place a real token in this file.
+notificationPreferences:
+  baseURL:
+  serviceToken:
+  timeout: 2s
+  # Required when baseURL/serviceToken are configured: fail-open or fail-closed.
+  failureMode:
+
 fullUserCache: true

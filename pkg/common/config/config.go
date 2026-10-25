@@ -284,6 +284,12 @@ type Push struct {
 		BadgeCount bool   `yaml:"badgeCount"`
 		Production bool   `yaml:"production"`
 	} `yaml:"iosPush"`
+	NotificationPreferences struct {
+		BaseURL      string        `yaml:"baseURL"`
+		ServiceToken string        `yaml:"serviceToken"`
+		Timeout      time.Duration `yaml:"timeout"`
+		FailureMode  string        `yaml:"failureMode"`
+	} `yaml:"notificationPreferences"`
 	FullUserCache  bool           `yaml:"fullUserCache"`
 	RateLimiter    RateLimiter    `yaml:"rateLimiter"`
 	CircuitBreaker CircuitBreaker `yaml:"circuitBreaker"`

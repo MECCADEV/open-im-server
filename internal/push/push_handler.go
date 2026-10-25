@@ -85,11 +85,15 @@ func NewConsumerHandler(ctx context.Context, config *Config, database controller
 	return &consumerHandler, nil
 }
 
-func (c *ConsumerHandler) HandleMs2PsChat(ctx context.Context, msg []byte) {
+func (c *ConsumerHandler) HandleMs2PsChat(ctx context.Context, msg []byte) error {
 	msgFromMQ := pbpush.PushMsgReq{}
 	if err := proto.Unmarshal(msg, &msgFromMQ); err != nil {
 		log.ZError(ctx, "push Unmarshal msg err", err, "msg", string(msg))
-		return
+		return nil
+	}
+	if msgFromMQ.MsgData == nil {
+		log.ZError(ctx, "push message data is empty", nil, "msg", msgFromMQ.String())
+		return nil
 	}
 
 	sec := msgFromMQ.MsgData.SendTime / 1000
@@ -117,6 +121,7 @@ func (c *ConsumerHandler) HandleMs2PsChat(ctx context.Context, msg []byte) {
 	if err != nil {
 		log.ZWarn(ctx, "push failed", err, "msg", msgFromMQ.String())
 	}
+	return err
 }
 
 func (c *ConsumerHandler) WaitCache() {
@@ -172,7 +177,7 @@ func (c *ConsumerHandler) Push2User(ctx context.Context, userIDs []string, msg *
 	if err != nil {
 		log.ZDebug(ctx, "offlinePushMsg failed", err, "needOfflinePushUserID", needOfflinePushUserID, "msg", msg)
 		log.ZWarn(ctx, "offlinePushMsg failed", err, "needOfflinePushUserID length", len(needOfflinePushUserID), "msg", msg)
-		return nil
+		return err
 	}
 
 	return nil
@@ -256,18 +261,20 @@ func (c *ConsumerHandler) Push2Group(ctx context.Context, groupID string, msg *s
 
 	// Use offline push messaging
 	if len(needOfflinePushUserIDs) > 0 {
-		c.asyncOfflinePush(ctx, needOfflinePushUserIDs, msg)
+		if err := c.asyncOfflinePush(ctx, needOfflinePushUserIDs, msg); err != nil {
+			return err
+		}
 	}
 
 	return nil
 }
 
-func (c *ConsumerHandler) asyncOfflinePush(ctx context.Context, needOfflinePushUserIDs []string, msg *sdkws.MsgData) {
+func (c *ConsumerHandler) asyncOfflinePush(ctx context.Context, needOfflinePushUserIDs []string, msg *sdkws.MsgData) error {
 	var offlinePushUserIDs []string
 	err := c.webhookBeforeOfflinePush(ctx, &c.config.WebhooksConfig.BeforeOfflinePush, needOfflinePushUserIDs, msg, &offlinePushUserIDs)
 	if err != nil {
 		log.ZWarn(ctx, "webhookBeforeOfflinePush failed", err, "msg", msg)
-		return
+		return err
 	}
 
 	if len(offlinePushUserIDs) > 0 {
@@ -279,8 +286,9 @@ func (c *ConsumerHandler) asyncOfflinePush(ctx context.Context, needOfflinePushU
 		log.ZWarn(ctx, "Msg To OfflinePush MQ error", err, "needOfflinePushUserIDs length",
 			len(needOfflinePushUserIDs), "msg", msg)
 		prommetrics.GroupChatMsgProcessFailedCounter.Inc()
-		return
+		return err
 	}
+	return nil
 }
 
 func (c *ConsumerHandler) groupMessagesHandler(ctx context.Context, groupID string, pushToUserIDs *[]string, msg *sdkws.MsgData) (err error) {
@@ -396,6 +404,8 @@ func (c *ConsumerHandler) getOfflinePushInfos(msg *sdkws.MsgData) (title, conten
 	if content == "" {
 		content = title
 	}
+	opts.Data = fcmMessageData(msg)
+	opts.MentionedUserIDs = append([]string(nil), msg.AtUserIDList...)
 	return
 }
 

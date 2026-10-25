@@ -16,6 +16,8 @@ package msg
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 
 	"github.com/openimsdk/open-im-server/v3/pkg/authverify"
 	"google.golang.org/protobuf/proto"
@@ -34,6 +36,11 @@ import (
 	"github.com/openimsdk/tools/utils/datautil"
 )
 
+type sendIdentity struct {
+	sendID      string
+	clientMsgID string
+}
+
 func (m *msgServer) SendMsg(ctx context.Context, req *pbmsg.SendMsgReq) (*pbmsg.SendMsgResp, error) {
 	if req.MsgData == nil {
 		return nil, errs.ErrArgs.WrapMsg("msgData is nil")
@@ -41,8 +48,32 @@ func (m *msgServer) SendMsg(ctx context.Context, req *pbmsg.SendMsgReq) (*pbmsg.
 	if err := authverify.CheckAccess(ctx, req.MsgData.SendID); err != nil {
 		return nil, err
 	}
+	fingerprint, err := sendPayloadFingerprint(req.MsgData)
+	if err != nil {
+		return nil, err
+	}
+	identity := sendIdentity{sendID: req.MsgData.SendID, clientMsgID: req.MsgData.ClientMsgID}
+	if req.MsgData.ClientMsgID != "" {
+		canonical, replayed, err := m.MsgDatabase.ReplaySend(ctx, req.MsgData.SendID, req.MsgData.ClientMsgID, fingerprint)
+		if err != nil {
+			return nil, err
+		}
+		if replayed {
+			resp := &pbmsg.SendMsgResp{
+				ServerMsgID: canonical.ServerMsgID,
+				ClientMsgID: canonical.ClientMsgID,
+				SendTime:    canonical.SendTime,
+			}
+			modify, err := sendMessageModify(req.MsgData, canonical)
+			if err != nil {
+				return nil, err
+			}
+			resp.Modify = modify
+			return resp, nil
+		}
+	}
 	before := new(*sdkws.MsgData)
-	resp, err := m.sendMsg(ctx, req, before)
+	resp, err := m.sendMsg(ctx, req, before, fingerprint, identity)
 	if err != nil {
 		return nil, err
 	}
@@ -52,21 +83,21 @@ func (m *msgServer) SendMsg(ctx context.Context, req *pbmsg.SendMsgReq) (*pbmsg.
 	return resp, nil
 }
 
-func (m *msgServer) sendMsg(ctx context.Context, req *pbmsg.SendMsgReq, before **sdkws.MsgData) (*pbmsg.SendMsgResp, error) {
+func (m *msgServer) sendMsg(ctx context.Context, req *pbmsg.SendMsgReq, before **sdkws.MsgData, payloadHash string, identity sendIdentity) (*pbmsg.SendMsgResp, error) {
 	m.encapsulateMsgData(req.MsgData)
 	switch req.MsgData.SessionType {
 	case constant.SingleChatType:
-		return m.sendMsgSingleChat(ctx, req, before)
+		return m.sendMsgSingleChat(ctx, req, before, payloadHash, identity)
 	case constant.NotificationChatType:
-		return m.sendMsgNotification(ctx, req, before)
+		return m.sendMsgNotification(ctx, req, before, payloadHash, identity)
 	case constant.ReadGroupChatType:
-		return m.sendMsgGroupChat(ctx, req, before)
+		return m.sendMsgGroupChat(ctx, req, before, payloadHash, identity)
 	default:
 		return nil, errs.ErrArgs.WrapMsg("unknown sessionType")
 	}
 }
 
-func (m *msgServer) sendMsgGroupChat(ctx context.Context, req *pbmsg.SendMsgReq, before **sdkws.MsgData) (resp *pbmsg.SendMsgResp, err error) {
+func (m *msgServer) sendMsgGroupChat(ctx context.Context, req *pbmsg.SendMsgReq, before **sdkws.MsgData, payloadHash string, identity sendIdentity) (resp *pbmsg.SendMsgResp, err error) {
 	if err = m.messageVerification(ctx, req); err != nil {
 		prommetrics.GroupChatMsgProcessFailedCounter.Inc()
 		return nil, err
@@ -78,7 +109,7 @@ func (m *msgServer) sendMsgGroupChat(ctx context.Context, req *pbmsg.SendMsgReq,
 	if err := m.webhookBeforeMsgModify(ctx, &m.config.WebhooksConfig.BeforeMsgModify, req, before); err != nil {
 		return nil, err
 	}
-	err = m.MsgDatabase.MsgToMQ(ctx, conversationutil.GenConversationUniqueKeyForGroup(req.MsgData.GroupID), req.MsgData)
+	req.MsgData, err = m.MsgDatabase.MsgToMQ(ctx, conversationutil.GenConversationUniqueKeyForGroup(req.MsgData.GroupID), req.MsgData, payloadHash, identity.sendID, identity.clientMsgID)
 	if err != nil {
 		return nil, err
 	}
@@ -158,8 +189,9 @@ func (m *msgServer) setConversationAtInfo(nctx context.Context, msg *sdkws.MsgDa
 	}
 }
 
-func (m *msgServer) sendMsgNotification(ctx context.Context, req *pbmsg.SendMsgReq, before **sdkws.MsgData) (resp *pbmsg.SendMsgResp, err error) {
-	if err := m.MsgDatabase.MsgToMQ(ctx, conversationutil.GenConversationUniqueKeyForSingle(req.MsgData.SendID, req.MsgData.RecvID), req.MsgData); err != nil {
+func (m *msgServer) sendMsgNotification(ctx context.Context, req *pbmsg.SendMsgReq, before **sdkws.MsgData, payloadHash string, identity sendIdentity) (resp *pbmsg.SendMsgResp, err error) {
+	req.MsgData, err = m.MsgDatabase.MsgToMQ(ctx, conversationutil.GenConversationUniqueKeyForSingle(req.MsgData.SendID, req.MsgData.RecvID), req.MsgData, payloadHash, identity.sendID, identity.clientMsgID)
+	if err != nil {
 		return nil, err
 	}
 	resp = &pbmsg.SendMsgResp{
@@ -170,7 +202,7 @@ func (m *msgServer) sendMsgNotification(ctx context.Context, req *pbmsg.SendMsgR
 	return resp, nil
 }
 
-func (m *msgServer) sendMsgSingleChat(ctx context.Context, req *pbmsg.SendMsgReq, before **sdkws.MsgData) (resp *pbmsg.SendMsgResp, err error) {
+func (m *msgServer) sendMsgSingleChat(ctx context.Context, req *pbmsg.SendMsgReq, before **sdkws.MsgData, payloadHash string, identity sendIdentity) (resp *pbmsg.SendMsgResp, err error) {
 	if err := m.messageVerification(ctx, req); err != nil {
 		return nil, err
 	}
@@ -189,7 +221,8 @@ func (m *msgServer) sendMsgSingleChat(ctx context.Context, req *pbmsg.SendMsgReq
 		if err := m.webhookBeforeMsgModify(ctx, &m.config.WebhooksConfig.BeforeMsgModify, req, before); err != nil {
 			return nil, err
 		}
-		if err := m.MsgDatabase.MsgToMQ(ctx, conversationutil.GenConversationUniqueKeyForSingle(req.MsgData.SendID, req.MsgData.RecvID), req.MsgData); err != nil {
+		req.MsgData, err = m.MsgDatabase.MsgToMQ(ctx, conversationutil.GenConversationUniqueKeyForSingle(req.MsgData.SendID, req.MsgData.RecvID), req.MsgData, payloadHash, identity.sendID, identity.clientMsgID)
+		if err != nil {
 			prommetrics.SingleChatMsgProcessFailedCounter.Inc()
 			return nil, err
 		}
@@ -202,6 +235,34 @@ func (m *msgServer) sendMsgSingleChat(ctx context.Context, req *pbmsg.SendMsgReq
 			SendTime:    req.MsgData.SendTime,
 		}, nil
 	}
+}
+
+func sendPayloadFingerprint(msg *sdkws.MsgData) (string, error) {
+	canonical := proto.Clone(msg).(*sdkws.MsgData)
+	canonical.ServerMsgID = ""
+	canonical.Seq = 0
+	canonical.SendTime = 0
+	data, err := (proto.MarshalOptions{Deterministic: true}).Marshal(canonical)
+	if err != nil {
+		return "", err
+	}
+	hash := sha256.Sum256(data)
+	return hex.EncodeToString(hash[:]), nil
+}
+
+func sendMessageModify(original, canonical *sdkws.MsgData) (*sdkws.MsgData, error) {
+	originalHash, err := sendPayloadFingerprint(original)
+	if err != nil {
+		return nil, err
+	}
+	canonicalHash, err := sendPayloadFingerprint(canonical)
+	if err != nil {
+		return nil, err
+	}
+	if originalHash == canonicalHash {
+		return nil, nil
+	}
+	return canonical, nil
 }
 
 func (m *msgServer) SendSimpleMsg(ctx context.Context, req *pbmsg.SendSimpleMsgReq) (*pbmsg.SendSimpleMsgResp, error) {

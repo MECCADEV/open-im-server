@@ -15,12 +15,16 @@
 package msgtransfer
 
 import (
+	"context"
+	"errors"
+
 	"github.com/openimsdk/tools/mq"
 
 	"github.com/openimsdk/open-im-server/v3/pkg/common/prommetrics"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/storage/controller"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/webhook"
 	pbmsg "github.com/openimsdk/protocol/msg"
+	"github.com/openimsdk/protocol/sdkws"
 	"github.com/openimsdk/tools/log"
 	"google.golang.org/protobuf/proto"
 )
@@ -29,17 +33,22 @@ type OnlineHistoryMongoConsumerHandler struct {
 	msgTransferDatabase controller.MsgTransferDatabase
 	config              *Config
 	webhookClient       *webhook.Client
+	afterMsgSave        func(context.Context, *sdkws.MsgData)
 }
 
 func NewOnlineHistoryMongoConsumerHandler(database controller.MsgTransferDatabase, config *Config) *OnlineHistoryMongoConsumerHandler {
-	return &OnlineHistoryMongoConsumerHandler{
+	handler := &OnlineHistoryMongoConsumerHandler{
 		msgTransferDatabase: database,
 		config:              config,
 		webhookClient:       webhook.NewWebhookClientForConfig(config.WebhooksConfig),
 	}
+	handler.afterMsgSave = func(ctx context.Context, msg *sdkws.MsgData) {
+		handler.webhookAfterMsgSaveDB(ctx, &config.WebhooksConfig.AfterMsgSaveDB, msg)
+	}
+	return handler
 }
 
-func (mc *OnlineHistoryMongoConsumerHandler) HandleChatWs2Mongo(val mq.Message) {
+func (mc *OnlineHistoryMongoConsumerHandler) HandleChatWs2Mongo(val mq.Message) error {
 	ctx := val.Context()
 	key := val.Key()
 	msg := val.Value()
@@ -47,25 +56,28 @@ func (mc *OnlineHistoryMongoConsumerHandler) HandleChatWs2Mongo(val mq.Message) 
 	err := proto.Unmarshal(msg, &msgFromMQ)
 	if err != nil {
 		log.ZError(ctx, "unmarshall failed", err, "key", key, "len", len(msg))
-		return
+		return err
 	}
 	if len(msgFromMQ.MsgData) == 0 {
 		log.ZError(ctx, "msgFromMQ.MsgData is empty", nil, "key", key, "msg", msg)
-		return
+		return errors.New("mongo transfer message contains no messages")
 	}
 	log.ZDebug(ctx, "mongo consumer recv msg", "msgs", msgFromMQ.String())
 	err = mc.msgTransferDatabase.BatchInsertChat2DB(ctx, msgFromMQ.ConversationID, msgFromMQ.MsgData, msgFromMQ.LastSeq)
 	if err != nil {
 		log.ZError(ctx, "batch data insert to mongo err", err, "msg", msgFromMQ.MsgData, "conversationID", msgFromMQ.ConversationID)
 		prommetrics.MsgInsertMongoFailedCounter.Inc()
-	} else {
-		prommetrics.MsgInsertMongoSuccessCounter.Inc()
-		val.Mark()
+		return err
 	}
+	prommetrics.MsgInsertMongoSuccessCounter.Inc()
+	val.Mark()
 
 	for _, msgData := range msgFromMQ.MsgData {
-		mc.webhookAfterMsgSaveDB(ctx, &mc.config.WebhooksConfig.AfterMsgSaveDB, msgData)
+		if mc.afterMsgSave != nil {
+			mc.afterMsgSave(ctx, msgData)
+		}
 	}
+	return nil
 
 	//var seqs []int64
 	//for _, msg := range msgFromMQ.MsgData {

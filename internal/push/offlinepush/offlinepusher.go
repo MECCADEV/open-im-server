@@ -23,6 +23,7 @@ import (
 	"github.com/openimsdk/open-im-server/v3/internal/push/offlinepush/options"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/config"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/storage/cache"
+	"github.com/redis/go-redis/v9"
 	"strings"
 )
 
@@ -37,14 +38,14 @@ type OfflinePusher interface {
 	Push(ctx context.Context, userIDs []string, title, content string, opts *options.Opts) error
 }
 
-func NewOfflinePusher(pushConf *config.Push, cache cache.ThirdCache, fcmConfigPath string) (OfflinePusher, error) {
+func NewOfflinePusher(pushConf *config.Push, cache cache.ThirdCache, fcmConfigPath string, redisClient redis.UniversalClient) (OfflinePusher, error) {
 	var offlinePusher OfflinePusher
 	pushConf.Enable = strings.ToLower(pushConf.Enable)
 	switch pushConf.Enable {
 	case geTUI:
 		offlinePusher = getui.NewClient(pushConf, cache)
 	case firebase:
-		return fcm.NewClient(pushConf, cache, fcmConfigPath)
+		return fcm.NewClient(pushConf, cache, fcmConfigPath, redisClient)
 	case jPush:
 		offlinePusher = jpush.NewClient(pushConf)
 	default:

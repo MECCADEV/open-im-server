@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/openimsdk/open-im-server/v3/internal/notificationstate"
 	"github.com/openimsdk/open-im-server/v3/pkg/authverify"
 	cbapi "github.com/openimsdk/open-im-server/v3/pkg/callbackstruct"
 	"github.com/openimsdk/protocol/constant"
@@ -99,6 +100,9 @@ func (m *msgServer) SetConversationHasReadSeq(ctx context.Context, req *msg.SetC
 	if err := m.MsgDatabase.SetHasReadSeq(ctx, req.UserID, req.ConversationID, req.HasReadSeq); err != nil {
 		return nil, err
 	}
+	if err := m.advanceNotificationRead(ctx, req.UserID, req.ConversationID, req.HasReadSeq); err != nil {
+		return nil, err
+	}
 	m.sendMarkAsReadNotification(ctx, req.ConversationID, constant.SingleChatType, req.UserID, req.UserID, nil, req.HasReadSeq)
 	return &msg.SetConversationHasReadSeqResp{}, nil
 }
@@ -131,6 +135,11 @@ func (m *msgServer) MarkMsgsAsRead(ctx context.Context, req *msg.MarkMsgsAsReadR
 		if err != nil {
 			return nil, err
 		}
+	} else {
+		hasReadSeq = currentHasReadSeq
+	}
+	if err = m.advanceNotificationRead(ctx, req.UserID, req.ConversationID, hasReadSeq); err != nil {
+		return nil, err
 	}
 
 	reqCallback := &cbapi.CallbackSingleMsgReadReq{
@@ -148,6 +157,13 @@ func (m *msgServer) MarkMsgsAsRead(ctx context.Context, req *msg.MarkMsgsAsReadR
 func (m *msgServer) MarkConversationAsRead(ctx context.Context, req *msg.MarkConversationAsReadReq) (*msg.MarkConversationAsReadResp, error) {
 	if err := authverify.CheckAccess(ctx, req.UserID); err != nil {
 		return nil, err
+	}
+	maxSeq, err := m.MsgDatabase.GetMaxSeq(ctx, req.ConversationID)
+	if err != nil {
+		return nil, err
+	}
+	if req.HasReadSeq > maxSeq {
+		return nil, errs.ErrArgs.WrapMsg("hasReadSeq must not be bigger than maxSeq")
 	}
 	conversation, err := m.ConversationLocalCache.GetConversation(ctx, req.UserID, req.ConversationID)
 	if err != nil {
@@ -183,6 +199,9 @@ func (m *msgServer) MarkConversationAsRead(ctx context.Context, req *msg.MarkCon
 			}
 			hasReadSeq = req.HasReadSeq
 		}
+		if err = m.advanceNotificationRead(ctx, req.UserID, req.ConversationID, hasReadSeq); err != nil {
+			return nil, err
+		}
 		m.sendMarkAsReadNotification(ctx, req.ConversationID, conversation.ConversationType, req.UserID,
 			m.conversationAndGetRecvID(conversation, req.UserID), seqs, hasReadSeq)
 	} else if conversation.ConversationType == constant.ReadGroupChatType ||
@@ -193,6 +212,9 @@ func (m *msgServer) MarkConversationAsRead(ctx context.Context, req *msg.MarkCon
 				return nil, err
 			}
 			hasReadSeq = req.HasReadSeq
+		}
+		if err = m.advanceNotificationRead(ctx, req.UserID, req.ConversationID, hasReadSeq); err != nil {
+			return nil, err
 		}
 		m.sendMarkAsReadNotification(ctx, req.ConversationID, constant.SingleChatType, req.UserID,
 			req.UserID, seqs, hasReadSeq)
@@ -218,6 +240,16 @@ func (m *msgServer) MarkConversationAsRead(ctx context.Context, req *msg.MarkCon
 	return &msg.MarkConversationAsReadResp{}, nil
 }
 
+func (m *msgServer) advanceNotificationRead(ctx context.Context, userID, conversationID string, sequence int64) error {
+	if m.notificationReadWatermarker == nil || sequence <= 0 {
+		return nil
+	}
+	_, err := m.notificationReadWatermarker.AdvanceRead(
+		ctx, userID, conversationID, sequence, notificationstate.RetentionMillis,
+	)
+	return err
+}
+
 func (m *msgServer) sendMarkAsReadNotification(ctx context.Context, conversationID string, sessionType int32, sendID, recvID string, seqs []int64, hasReadSeq int64) {
 	tips := &sdkws.MarkAsReadTips{
 		MarkAsReadUserID: sendID,
@@ -225,5 +257,22 @@ func (m *msgServer) sendMarkAsReadNotification(ctx context.Context, conversation
 		Seqs:             seqs,
 		HasReadSeq:       hasReadSeq,
 	}
-	m.notificationSender.NotificationWithSessionType(ctx, sendID, recvID, constant.HasReadReceipt, sessionType, tips)
+	for _, target := range readReceiptTargets(sendID, recvID, sessionType) {
+		m.notificationSender.NotificationWithSessionType(ctx, sendID, target.userID, constant.HasReadReceipt, target.sessionType, tips)
+	}
+}
+
+type readReceiptTarget struct {
+	userID      string
+	sessionType int32
+}
+
+func readReceiptTargets(sendID, recvID string, sessionType int32) []readReceiptTarget {
+	targets := []readReceiptTarget{{userID: recvID, sessionType: sessionType}}
+	if sendID != recvID {
+		// The normal receipt goes to the peer/group. A self-addressed online-only
+		// copy lets this user's other active sessions clear the same alert.
+		targets = append(targets, readReceiptTarget{userID: sendID, sessionType: constant.SingleChatType})
+	}
+	return targets
 }
