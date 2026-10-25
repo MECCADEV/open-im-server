@@ -1,0 +1,7 @@
+services:
+  minio:
+    # Docker Hub and Quay no longer serve the pinned community image. Keep CI
+    # on a pullable S3-compatible image without changing the developer default.
+    image: cgr.dev/chainguard/minio@sha256:268d68a2a3b6fc65f905a61f84d7eab6345ce6bff14f551e2b028ec31e6a1341
+    # The compose default command already includes the `minio` executable.
+    entrypoint: []

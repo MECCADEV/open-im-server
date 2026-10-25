@@ -55,7 +55,9 @@ jobs:
       - name: Set up infra services
         uses: hoverkraft-tech/compose-action@v3.0.0
         with:
-          compose-file: "${{ github.workspace }}/open-im-server/docker-compose.yml"
+          compose-file: |
+            ${{ github.workspace }}/open-im-server/docker-compose.yml
+            ${{ github.workspace }}/open-im-server/docker-compose.ci.yml
 
       - name: Modify Server Configuration
         run: |
@@ -244,7 +246,7 @@ jobs:
 
       - name: Start Server Services
         run: |
-          docker compose up -d
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d
           mage build
           mage start
           mage check
