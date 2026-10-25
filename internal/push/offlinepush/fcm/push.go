@@ -353,7 +353,7 @@ func (f *Fcm) push(ctx context.Context, userIDs []string, title, content string,
 	for _, claim := range claims {
 		outcome := "sent"
 		if deliveryErr != nil {
-			outcome = "retry"
+			outcome = "ambiguous"
 		}
 		if err := f.coalescer.finish(ctx, claim, outcome); err != nil && deliveryErr == nil {
 			deliveryErr = err
@@ -428,7 +428,7 @@ func (f *Fcm) deliverPendingNotification(ctx context.Context, claim *notificatio
 	pushErr := f.push(leaseCtx, []string{item.UserID}, item.Title, item.Content, &item.Options, true)
 	stopLease()
 	if pushErr != nil {
-		if finishErr := f.coalescer.finish(ctx, claim, "retry"); finishErr != nil {
+		if finishErr := f.coalescer.finish(ctx, claim, "ambiguous"); finishErr != nil {
 			log.ZWarn(ctx, "retry coalesced FCM notification failed", finishErr, "userID", item.UserID)
 		}
 	} else if err := f.coalescer.finish(ctx, claim, "sent"); err != nil {

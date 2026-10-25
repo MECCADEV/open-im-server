@@ -421,20 +421,28 @@ func TestRedisCoalescerRetryBackoffKeepsOnlyLatestFailedMessage(t *testing.T) {
 	coalescer, _ := newNotificationCoalescer(client)
 	coalescer.now = func() time.Time { return now }
 	first := pendingNotification{UserID: userID, ConversationID: conversationID, Content: "failed"}
-	claim, err := coalescer.schedule(context.Background(), userID, conversationID, 2, first)
+	claim, err := coalescer.schedule(context.Background(), userID, conversationID, 10, first)
 	if err != nil || claim == nil {
 		t.Fatalf("initial schedule = (%+v, %v)", claim, err)
 	}
-	if err := coalescer.finish(context.Background(), claim, "retry"); err != nil {
+	if err := coalescer.finish(context.Background(), claim, "ambiguous"); err != nil {
 		t.Fatal(err)
 	}
 	latest := first
 	latest.Content = "latest-after-failure"
-	if claim, err := coalescer.schedule(context.Background(), userID, conversationID, 2, latest); err != nil || claim != nil {
+	if claim, err := coalescer.schedule(context.Background(), userID, conversationID, 10, latest); err != nil || claim != nil {
 		t.Fatalf("schedule during retry backoff = (%+v, %v), want queued", claim, err)
 	}
 	if claim, err := coalescer.claimDue(context.Background()); err != nil || claim != nil {
 		t.Fatalf("claim before retry deadline = (%+v, %v), want none", claim, err)
+	}
+	now = now.Add(time.Second)
+	if claim, err := coalescer.claimDue(context.Background()); err != nil || claim != nil {
+		t.Fatalf("claim before frequency cap = (%+v, %v), want none", claim, err)
+	}
+	now = now.Add(8 * time.Second)
+	if claim, err := coalescer.claimDue(context.Background()); err != nil || claim != nil {
+		t.Fatalf("claim before full frequency cap = (%+v, %v), want none", claim, err)
 	}
 	now = now.Add(time.Second)
 	claim, err = coalescer.claimDue(context.Background())
@@ -443,6 +451,52 @@ func TestRedisCoalescerRetryBackoffKeepsOnlyLatestFailedMessage(t *testing.T) {
 	}
 	if err := coalescer.finish(context.Background(), claim, "sent"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAmbiguousProviderAcknowledgmentHonorsConfiguredFrequency(t *testing.T) {
+	client := redisTestClient(t)
+	userID, conversationID := uniqueNotificationKey()
+	stateKey, dueKey := notificationKeys(userID, conversationID)
+	t.Cleanup(func() {
+		_ = client.Del(context.Background(), stateKey).Err()
+		_ = client.ZRem(context.Background(), dueKey, stateKey).Err()
+	})
+
+	now := time.UnixMilli(4_500_000)
+	coalescer, err := newNotificationCoalescer(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coalescer.now = func() time.Time { return now }
+	item := pendingNotification{
+		UserID: userID, ConversationID: conversationID, Title: "group", Content: "possibly accepted",
+		Options: options.Opts{Data: map[string]string{"conversationID": conversationID, "seq": "20"}},
+	}
+	claim, err := coalescer.schedule(context.Background(), userID, conversationID, 10, item)
+	if err != nil || claim == nil {
+		t.Fatalf("initial schedule = (%+v, %v), want immediate claim", claim, err)
+	}
+	settings := notificationprefs.DefaultSettings()
+	settings.MaxUpdateFrequencySeconds = 10
+	sender := &recordingMessageSender{err: fmt.Errorf("provider acknowledgement timed out")}
+	push := &Fcm{
+		fcmMsgCli: sender, cache: notificationTestCache{}, coalescer: coalescer,
+		notificationPreferences: &mutablePreferenceResolver{settings: settings},
+	}
+	push.deliverPendingNotification(context.Background(), claim)
+	if sender.sent == 0 {
+		t.Fatal("expected the provider send attempt")
+	}
+
+	now = now.Add(time.Second)
+	if retry, err := coalescer.claimDue(context.Background()); err != nil || retry != nil {
+		t.Fatalf("retry before configured cap = (%+v, %v), want none", retry, err)
+	}
+	now = now.Add(9 * time.Second)
+	retry, err := coalescer.claimDue(context.Background())
+	if err != nil || retry == nil || retry.payload.Content != item.Content {
+		t.Fatalf("retry at configured cap = (%+v, %v), want retained preview", retry, err)
 	}
 }
 

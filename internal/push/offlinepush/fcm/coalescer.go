@@ -80,7 +80,10 @@ if incoming_sequence ~= '' and last_sequence ~= '' then
     return {0}
   end
 end
-local last = tonumber(redis.call('HGET', KEYS[1], 'last_sent_ms') or '0')
+-- last_sent_ms is retained as a compatibility alias for deployments that
+-- already have coalescer state; every provider attempt must consume the cap
+-- because a timeout can mean FCM accepted the alert but its ack was lost.
+local last = tonumber(redis.call('HGET', KEYS[1], 'last_attempt_ms') or redis.call('HGET', KEYS[1], 'last_sent_ms') or '0')
 local lease_until = tonumber(redis.call('HGET', KEYS[1], 'lease_until_ms') or '0')
 local retry_count = tonumber(redis.call('HGET', KEYS[1], 'retry_count') or '0')
 local generation = redis.call('HINCRBY', KEYS[1], 'generation', 1)
@@ -159,7 +162,7 @@ local frequency = tonumber(redis.call('HGET', KEYS[1], 'frequency_ms') or '2000'
 redis.call('HDEL', KEYS[1], 'lease_token', 'lease_until_ms')
 
 if outcome == 'sent' then
-  redis.call('HSET', KEYS[1], 'last_sent_ms', now, 'retry_count', 0)
+  redis.call('HSET', KEYS[1], 'last_attempt_ms', now, 'last_sent_ms', now, 'retry_count', 0)
   if current_generation == generation then
     redis.call('HDEL', KEYS[1], 'payload', 'pending_sequence')
     redis.call('ZREM', KEYS[2], KEYS[1])
@@ -177,7 +180,16 @@ else
   local retries = redis.call('HINCRBY', KEYS[1], 'retry_count', 1)
   local exponent = math.min(retries - 1, 6)
   local delay = math.min(60000, 1000 * (2 ^ exponent))
-  redis.call('ZADD', KEYS[2], now + delay, KEYS[1])
+  local retry_due = now + delay
+  if outcome == 'ambiguous' then
+    -- The provider may have accepted the request even when the client
+    -- observed a timeout. Count that attempt against the cap to avoid a rapid
+    -- duplicate alert while retaining bounded exponential backoff.
+    redis.call('HSET', KEYS[1], 'last_attempt_ms', now, 'last_sent_ms', now)
+    local frequency_due = now + frequency
+    if frequency_due > retry_due then retry_due = frequency_due end
+  end
+  redis.call('ZADD', KEYS[2], retry_due, KEYS[1])
 end
 redis.call('PEXPIRE', KEYS[1], retention)
 return 1
@@ -196,7 +208,7 @@ var deferNotificationForFrequencyScript = redis.NewScript(`
 if redis.call('HGET', KEYS[1], 'lease_token') ~= ARGV[1] then return -1 end
 local now = tonumber(ARGV[2])
 local frequency = tonumber(ARGV[3])
-local last = tonumber(redis.call('HGET', KEYS[1], 'last_sent_ms') or '0')
+local last = tonumber(redis.call('HGET', KEYS[1], 'last_attempt_ms') or redis.call('HGET', KEYS[1], 'last_sent_ms') or '0')
 redis.call('HSET', KEYS[1], 'frequency_ms', frequency)
 if last > 0 and last + frequency > now then
   redis.call('HDEL', KEYS[1], 'lease_token', 'lease_until_ms')
@@ -280,7 +292,7 @@ func (c *notificationCoalescer) finish(ctx context.Context, claim *notificationC
 	if claim == nil {
 		return nil
 	}
-	if outcome != "sent" && outcome != "suppressed" && outcome != "retry" {
+	if outcome != "sent" && outcome != "suppressed" && outcome != "retry" && outcome != "ambiguous" {
 		return fmt.Errorf("invalid coalescer outcome %q", outcome)
 	}
 	result, err := finishNotificationScript.Run(ctx, c.redis, []string{claim.stateKey, claim.dueKey}, claim.token, claim.generation, c.now().UnixMilli(), outcome, coalescerRetention.Milliseconds()).Int()

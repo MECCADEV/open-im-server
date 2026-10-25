@@ -100,12 +100,22 @@ clearing a newer message while an older one is in flight. Expired leases and
 pending entries are recovered after process restart; ambiguous FCM acceptance
 followed by a crash before Redis finalization can still resend, where the
 conversation tag/collapse identifier only mitigates visible duplicates. The
+Redis-backed regression `TestAmbiguousProviderAcknowledgmentHonorsConfiguredFrequency`
+exercises this path with a provider timeout and proves the alert is not retried
+before a configured 10-second cap. This is a deterministic queue test, not a
+live FCM acceptance test. The
 coalescer records the greatest nonzero conversation sequence seen during its
 30-day state lifetime and ignores a replay at or below that sequence. This
 prevents a delayed Kafka replay from replacing a newer pending group preview;
 it does not make provider delivery exactly-once or fence replays after the
 coalescer state expires. Messages without a sequence retain arrival-order
-behavior. The
+behavior. A provider send error is treated as ambiguous acceptance: the
+coalescer records the attempt and schedules a retry no earlier than the
+recipient's configured frequency interval, even when exponential backoff would
+otherwise retry sooner. This protects the update cap when FCM accepted an alert
+but its acknowledgement was lost; Redis loss/crash before attempt finalization
+and FCM's external delivery semantics still prevent an exactly-once guarantee.
+The
 coalescer follows the explicitly configured resolver failure mode: fail-open
 sends immediately if Redis is unavailable (temporarily relaxing the cap), and
 fail-closed does not send when it cannot persist scheduling state. Pending
