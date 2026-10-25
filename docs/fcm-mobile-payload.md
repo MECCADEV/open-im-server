@@ -99,17 +99,23 @@ generation checks prevent concurrent replicas from claiming the same flush or
 clearing a newer message while an older one is in flight. Expired leases and
 pending entries are recovered after process restart; ambiguous FCM acceptance
 followed by a crash before Redis finalization can still resend, where the
-conversation tag/collapse identifier only mitigates visible duplicates. The
-Redis-backed regression `TestAmbiguousProviderAcknowledgmentHonorsConfiguredFrequency`
-exercises this path with a provider timeout and proves the alert is not retried
-before a configured 10-second cap. This is a deterministic queue test, not a
-live FCM acceptance test. The
+conversation tag/collapse identifier only mitigates visible duplicates.
+Redis-backed regressions exercise both immediate and queued provider-timeout
+paths and prove alerts are not retried before a configured 10-second cap.
+`TestRedisCoalescerSuppressesUnsequencedReplayAndLearnsEnrichedAliases` verifies
+an older unsequenced replay is suppressed after a newer event and that a
+client-ID match can teach a later server-ID alias. These are deterministic
+queue tests, not live FCM acceptance tests. The
 coalescer records the greatest nonzero conversation sequence seen during its
 30-day state lifetime and ignores a replay at or below that sequence. This
 prevents a delayed Kafka replay from replacing a newer pending group preview;
 it does not make provider delivery exactly-once or fence replays after the
-coalescer state expires. Messages without a sequence retain arrival-order
-behavior. A provider send error is treated as ambiguous acceptance: the
+coalescer state expires. The state also keeps the most recent 128 client/server
+message-ID aliases per recipient and conversation; a replay matching either
+alias is suppressed, and a duplicate with newly enriched IDs teaches the
+coalescer the additional alias. This covers unsequenced and mixed-version
+replays; an older unsequenced replay after alias eviction can still show again.
+A provider send error is treated as ambiguous acceptance: the
 coalescer records the attempt and schedules a retry no earlier than the
 recipient's configured frequency interval, even when exponential backoff would
 otherwise retry sooner. This protects the update cap when FCM accepted an alert

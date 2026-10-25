@@ -22,6 +22,7 @@ const (
 	coalescerHeartbeat  = 10 * time.Second
 	coalescerRetention  = 30 * 24 * time.Hour
 	coalescerPoll       = 250 * time.Millisecond
+	unsequencedIDLimit  = 128
 )
 
 type pendingNotification struct {
@@ -65,6 +66,8 @@ local token = ARGV[4]
 local payload = ARGV[5]
 local retention = tonumber(ARGV[6])
 local incoming_sequence = ARGV[7]
+local incoming_ids_json = ARGV[8]
+local identity_limit = tonumber(ARGV[9])
 local read_sequence = redis.call('HGET', KEYS[1], 'read_sequence') or ''
 if incoming_sequence ~= '' and read_sequence ~= '' then
   if string.len(incoming_sequence) < string.len(read_sequence) or
@@ -78,6 +81,39 @@ if incoming_sequence ~= '' and last_sequence ~= '' then
     (string.len(incoming_sequence) == string.len(last_sequence) and incoming_sequence <= last_sequence) then
     redis.call('PEXPIRE', KEYS[1], retention)
     return {0}
+  end
+end
+if incoming_ids_json ~= '[]' then
+  local incoming_ok, incoming_ids = pcall(cjson.decode, incoming_ids_json)
+  if incoming_ok and type(incoming_ids) == 'table' then
+    local recent = {}
+    local recent_json = redis.call('HGET', KEYS[1], 'recent_message_ids')
+    if recent_json then
+      local recent_ok, decoded = pcall(cjson.decode, recent_json)
+      if recent_ok and type(decoded) == 'table' then recent = decoded end
+    end
+    local duplicate = false
+    for _, incoming_id in ipairs(incoming_ids) do
+      for _, seen_id in ipairs(recent) do
+        if incoming_id == seen_id then
+          duplicate = true
+          break
+        end
+      end
+    end
+    for _, incoming_id in ipairs(incoming_ids) do
+      local found = false
+      for _, seen_id in ipairs(recent) do
+        if incoming_id == seen_id then found = true; break end
+      end
+      if not found then table.insert(recent, incoming_id) end
+    end
+    while #recent > identity_limit do table.remove(recent, 1) end
+    redis.call('HSET', KEYS[1], 'recent_message_ids', cjson.encode(recent))
+    if duplicate then
+      redis.call('PEXPIRE', KEYS[1], retention)
+      return {0}
+    end
   end
 end
 -- last_sent_ms is retained as a compatibility alias for deployments that
@@ -227,6 +263,10 @@ func (c *notificationCoalescer) schedule(ctx context.Context, userID, conversati
 	if err != nil {
 		return nil, fmt.Errorf("encode pending notification: %w", err)
 	}
+	identities, err := json.Marshal(notificationIdentities(item))
+	if err != nil {
+		return nil, fmt.Errorf("encode notification identities: %w", err)
+	}
 	stateKey, dueKey := notificationKeys(userID, conversationID)
 	token, err := newLeaseToken()
 	if err != nil {
@@ -234,7 +274,7 @@ func (c *notificationCoalescer) schedule(ctx context.Context, userID, conversati
 	}
 	now := c.now().UnixMilli()
 	result, err := scheduleNotificationScript.Run(ctx, c.redis, []string{stateKey, dueKey},
-		now, (time.Duration(settingsFrequency) * time.Second).Milliseconds(), coalescerLease.Milliseconds(), token, string(payload), coalescerRetention.Milliseconds(), notificationSequence(item)).Slice()
+		now, (time.Duration(settingsFrequency) * time.Second).Milliseconds(), coalescerLease.Milliseconds(), token, string(payload), coalescerRetention.Milliseconds(), notificationSequence(item), string(identities), unsequencedIDLimit).Slice()
 	if err != nil {
 		return nil, fmt.Errorf("schedule coalesced notification: %w", err)
 	}
@@ -263,6 +303,18 @@ func notificationSequence(item pendingNotification) string {
 		return ""
 	}
 	return strconv.FormatInt(sequence, 10)
+}
+
+func notificationIdentities(item pendingNotification) []string {
+	data := item.Options.Data
+	identities := make([]string, 0, 2)
+	if clientMsgID := data["clientMsgID"]; clientMsgID != "" {
+		identities = append(identities, "client:"+clientMsgID)
+	}
+	if serverMsgID := data["serverMsgID"]; serverMsgID != "" {
+		identities = append(identities, "server:"+serverMsgID)
+	}
+	return identities
 }
 
 func (c *notificationCoalescer) claimDue(ctx context.Context) (*notificationClaim, error) {

@@ -541,6 +541,63 @@ func TestImmediateAmbiguousProviderAcknowledgmentHonorsConfiguredFrequency(t *te
 	}
 }
 
+func TestRedisCoalescerSuppressesUnsequencedReplayAndLearnsEnrichedAliases(t *testing.T) {
+	client := redisTestClient(t)
+	userID, conversationID := uniqueNotificationKey()
+	stateKey, dueKey := notificationKeys(userID, conversationID)
+	t.Cleanup(func() {
+		_ = client.Del(context.Background(), stateKey).Err()
+		_ = client.ZRem(context.Background(), dueKey, stateKey).Err()
+	})
+
+	now := time.UnixMilli(4_700_000)
+	coalescer, err := newNotificationCoalescer(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coalescer.now = func() time.Time { return now }
+
+	first := pendingNotification{
+		UserID: userID, ConversationID: conversationID, Content: "first",
+		Options: options.Opts{Data: map[string]string{"conversationID": conversationID, "clientMsgID": "client-1"}},
+	}
+	claim, err := coalescer.schedule(context.Background(), userID, conversationID, 2, first)
+	if err != nil || claim == nil {
+		t.Fatalf("first schedule = (%+v, %v), want immediate claim", claim, err)
+	}
+	if err := coalescer.finish(context.Background(), claim, "sent"); err != nil {
+		t.Fatal(err)
+	}
+
+	now = now.Add(2 * time.Second)
+	second := pendingNotification{
+		UserID: userID, ConversationID: conversationID, Content: "newer",
+		Options: options.Opts{Data: map[string]string{"conversationID": conversationID, "clientMsgID": "client-2", "serverMsgID": "server-2"}},
+	}
+	claim, err = coalescer.schedule(context.Background(), userID, conversationID, 2, second)
+	if err != nil || claim == nil {
+		t.Fatalf("newer schedule = (%+v, %v), want claim after cooldown", claim, err)
+	}
+	if err := coalescer.finish(context.Background(), claim, "sent"); err != nil {
+		t.Fatal(err)
+	}
+
+	now = now.Add(2 * time.Second)
+	enrichedReplay := first
+	enrichedReplay.Content = "duplicate with enriched IDs"
+	enrichedReplay.Options.Data["serverMsgID"] = "server-1"
+	if replay, err := coalescer.schedule(context.Background(), userID, conversationID, 2, enrichedReplay); err != nil || replay != nil {
+		t.Fatalf("enriched older replay = (%+v, %v), want suppression", replay, err)
+	}
+	serverOnlyReplay := pendingNotification{
+		UserID: userID, ConversationID: conversationID, Content: "duplicate server-only replay",
+		Options: options.Opts{Data: map[string]string{"conversationID": conversationID, "serverMsgID": "server-1"}},
+	}
+	if replay, err := coalescer.schedule(context.Background(), userID, conversationID, 2, serverOnlyReplay); err != nil || replay != nil {
+		t.Fatalf("server-only replay after alias enrichment = (%+v, %v), want suppression", replay, err)
+	}
+}
+
 func TestRedisCoalescerKeepsRecipientFrequencyIndependent(t *testing.T) {
 	client := redisTestClient(t)
 	conversationID := fmt.Sprintf("coalescer-test-conversation-%d", time.Now().UnixNano())
