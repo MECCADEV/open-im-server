@@ -13,6 +13,10 @@ jobs:
     name: Test with go ${{ matrix.go_version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
 
+    defaults:
+      run:
+        working-directory: open-im-server
+
     env:
       SHARE_CONFIG_PATH: config/share.yml
 
@@ -27,6 +31,15 @@ jobs:
     steps:
       - name: Checkout Server repository
         uses: actions/checkout@v7.0.0
+        with:
+          path: open-im-server
+
+      - name: Checkout PingMessenger protocol fork
+        uses: actions/checkout@v7.0.0
+        with:
+          repository: MECCADEV/protocol
+          ref: 1bf4e77f4476661dd503f901fd0f65d66d66fa70
+          path: openim-protocol
 
       - name: Set up Go ${{ matrix.go_version }}
         uses: actions/setup-go@v6.5.0
@@ -42,7 +55,7 @@ jobs:
       - name: Set up infra services
         uses: hoverkraft-tech/compose-action@v3.0.0
         with:
-          compose-file: "./docker-compose.yml"
+          compose-file: "${{ github.workspace }}/open-im-server/docker-compose.yml"
 
       - name: Modify Server Configuration
         run: |
@@ -178,6 +191,9 @@ jobs:
   go-test:
     name: Benchmark Test with go ${{ matrix.go_version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: open-im-server
     permissions:
       contents: write
     env:
@@ -193,6 +209,15 @@ jobs:
     steps:
       - name: Checkout Server repository
         uses: actions/checkout@v7.0.0
+        with:
+          path: open-im-server
+
+      - name: Checkout PingMessenger protocol fork
+        uses: actions/checkout@v7.0.0
+        with:
+          repository: MECCADEV/protocol
+          ref: 1bf4e77f4476661dd503f901fd0f65d66d66fa70
+          path: openim-protocol
 
       - name: Checkout SDK repository
         uses: actions/checkout@v7.0.0
@@ -226,7 +251,7 @@ jobs:
 
       - name: Build test SDK core
         run: |
-          cd ${{ env.SDK_DIR }}
+          cd "${{ github.workspace }}/${{ env.SDK_DIR }}"
           go mod tidy
           cd integration_test
           mkdir data
@@ -235,6 +260,9 @@ jobs:
   dockerfile-test:
     name: Build and Test Dockerfile
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: open-im-server
     strategy:
       matrix:
         go_version: ["stable"]
@@ -242,6 +270,15 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7.0.0
+        with:
+          path: open-im-server
+
+      - name: Checkout PingMessenger protocol fork
+        uses: actions/checkout@v7.0.0
+        with:
+          repository: MECCADEV/protocol
+          ref: 1bf4e77f4476661dd503f901fd0f65d66d66fa70
+          path: openim-protocol
 
       - name: Set up Go ${{ matrix.go_version }}
         uses: actions/setup-go@v6.5.0
@@ -255,10 +292,11 @@ jobs:
           go install github.com/magefile/mage@latest
 
       - name: Build Docker Image
+        working-directory: ${{ github.workspace }}
         run: |
           IMAGE_NAME="${{ github.event.repository.name }}-test"
           CONTAINER_NAME="${{ github.event.repository.name }}-container"
-          docker build -t $IMAGE_NAME .
+          docker build -f open-im-server/Dockerfile -t $IMAGE_NAME .
 
       - name: Run Docker Container
         run: |
