@@ -130,22 +130,40 @@ func TestSendMsgReplayRequiresAuthenticatedSenderAndSkipsNewSendValidation(t *te
 }
 
 func TestMessageWebhookCarriesStableDeduplicationIdentity(t *testing.T) {
-	callback := toCommonCallback(context.Background(), &pbmsg.SendMsgReq{
+	request := &pbmsg.SendMsgReq{
 		MsgData: &sdkws.MsgData{
 			SendID:      "sender-1",
 			ClientMsgID: "client-1",
 			ServerMsgID: "server-1",
 		},
-	}, cbapi.CallbackAfterSendSingleMsgCommand)
+	}
+	firstAttempt := toCommonCallback(
+		mcontext.SetOperationID(context.Background(), "attempt-1"),
+		request,
+		cbapi.CallbackAfterSendSingleMsgCommand,
+	)
+	replayedAttempt := toCommonCallback(
+		mcontext.SetOperationID(context.Background(), "attempt-2"),
+		request,
+		cbapi.CallbackAfterSendSingleMsgCommand,
+	)
 
-	if callback.SendID != "sender-1" || callback.ClientMsgID != "client-1" {
-		t.Fatalf("message webhook lost stable send identity: sendID=%q clientMsgID=%q", callback.SendID, callback.ClientMsgID)
+	if firstAttempt.SendID != "sender-1" || firstAttempt.ClientMsgID != "client-1" {
+		t.Fatalf("message webhook lost stable send identity: sendID=%q clientMsgID=%q", firstAttempt.SendID, firstAttempt.ClientMsgID)
 	}
-	if callback.CallbackCommand != cbapi.CallbackAfterSendSingleMsgCommand {
-		t.Fatalf("message webhook has unexpected command: %q", callback.CallbackCommand)
+	if firstAttempt.CallbackCommand != cbapi.CallbackAfterSendSingleMsgCommand {
+		t.Fatalf("message webhook has unexpected command: %q", firstAttempt.CallbackCommand)
 	}
-	if callback.ServerMsgID != "server-1" {
-		t.Fatalf("message webhook lost canonical server message ID: %q", callback.ServerMsgID)
+	if firstAttempt.ServerMsgID != "server-1" {
+		t.Fatalf("message webhook lost canonical server message ID: %q", firstAttempt.ServerMsgID)
+	}
+	firstKey := [3]string{firstAttempt.SendID, firstAttempt.ClientMsgID, firstAttempt.CallbackCommand}
+	replayedKey := [3]string{replayedAttempt.SendID, replayedAttempt.ClientMsgID, replayedAttempt.CallbackCommand}
+	if firstKey != replayedKey {
+		t.Fatalf("callback idempotency tuple changed across attempts: first=%v retry=%v", firstKey, replayedKey)
+	}
+	if firstAttempt.OperationID == replayedAttempt.OperationID {
+		t.Fatal("operation ID must identify the transport attempt, not the logical callback")
 	}
 }
 
