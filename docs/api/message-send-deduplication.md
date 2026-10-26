@@ -213,9 +213,11 @@ and must not be part of that key; `serverMsgID` is useful for correlating the
 accepted message but is not the cross-attempt key. This applies to before- and
 after-send callback payloads; stable identity permits receiver deduplication
 but does not make callback delivery durable. The server-side regression test
-`TestMessageWebhookCarriesStableDeduplicationIdentity`
-guards that the stable identity and callback command are present in the shared
-message callback payload.
+`TestMessageWebhookCarriesStableDeduplicationIdentity` guards that the stable
+identity and callback command are present in the shared message callback
+payload. It also constructs callbacks for two transport attempts, verifies
+that `(sendID, clientMsgID, callbackCommand)` is unchanged, and verifies that
+`operationID` changes; consumers must key deduplication on the former tuple.
 
 Push callbacks have the same logical-message ingredients: the online/offline
 push request types carry `sendID`, `clientMsgID`, and `callbackCommand`, and the
