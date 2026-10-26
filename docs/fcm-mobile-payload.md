@@ -189,11 +189,12 @@ uses the Platform contract defaults (`enabled=true`, `mode=all`, `sound=default`
 `max_update_frequency_seconds=2`) for grouping and sequence replay suppression.
 This keeps visible alerts while providing the documented default cap; custom
 per-user/per-conversation modes and sounds still require the resolver and
-service token. If Redis scheduling is unavailable with no resolver, delivery
-falls back to immediate legacy presentation and the cap/replay filter is
-temporarily relaxed. With the resolver configured, the explicit
-`failureMode` determines the outage behavior. Redis persistence/eviction
-settings remain a deployment requirement for restart recovery.
+service token. If Redis scheduling is unavailable, OpenIM returns an error
+without sending regardless of resolver configuration, allowing the offline
+push consumer's retry boundary to preserve the default or custom cap and replay
+filter. The explicit `failureMode` governs preference-resolver outages only.
+Redis persistence/eviction settings remain a deployment requirement for
+restart recovery.
 
 The Redis Lua integration tests cover first-send immediacy, latest-wins updates,
 messages arriving during a claimed flush, per-recipient caps, frequency changes,
