@@ -358,7 +358,10 @@ not add this OpenIM admin route to Platform OpenAPI.
   after-save callbacks are dispatched only after successful Mongo persistence;
   the callback delivery itself has no durable idempotency checkpoint.
 - `../openim-protocol/msg/msg.proto` (sibling repository): declares the
-  `SendMsg` request/response but has no idempotency semantics in the message
-  fields.
+  `SendMsg` request/response. Its adjacent source comment documents the
+  intended retry precondition and downstream at-least-once caveat, but the
+  wire fields themselves do not require a non-empty `ClientMsgID` or encode
+  outbox behavior; those semantics depend on the serving server version and
+  deployment.
 - `../openim-sdk-core/internal/conversation_msg/api.go` (sibling repository):
   implements `FindMessageList` by querying the local SDK database.
