@@ -44,6 +44,22 @@ conversation identity keep their prior platform payload.
 These fields follow the [FCM Android notification tag contract](https://firebase.google.com/docs/reference/fcm/rest/v1/projects.messages#AndroidNotification)
 and [Apple's APNs collapse identifier and notification grouping contract](https://developer.apple.com/documentation/usernotifications/sending-notification-requests-to-apns).
 
+## Registration ownership and logout
+
+`POST /third/fcm_update_token` is authenticated with the OpenIM user token. Its
+`account` must match the authenticated OpenIM user; the RPC rejects a mismatch
+before writing the token. Registration is stored by `(account, platformID)` and
+does not move the same FCM token away from another account key. The OpenIM SDK
+logout path attempts `DelUserPushToken` for the current account/platform over
+its authenticated long connection, but that cleanup is best-effort and the
+SDK may log a deletion failure without returning it to the caller. There is no
+documented HTTP route to revoke or move an FCM token. Deployments that support
+account switching must treat stale-token cleanup and same-device account
+ownership as an unresolved delivery boundary: a queued alert for an old account
+can still target a token if logout deletion failed. The current FCM payload
+does not carry a recipient OpenIM user ID, and an OS-rendered background alert
+cannot be filtered by Dart after delivery.
+
 The sender deliberately does not set a per-conversation Android `collapse_key`:
 FCM notification messages are already collapsible, and FCM documents a maximum
 of four distinct collapse keys per registration token. The platform identifier
