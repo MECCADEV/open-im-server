@@ -89,16 +89,34 @@ func (c *Client) SyncPost(ctx context.Context, command string, req callbackstruc
 	return c.post(ctx, command, req, resp, before.Timeout)
 }
 
-func (c *Client) AsyncPost(ctx context.Context, command string, req callbackstruct.CallbackReq, resp callbackstruct.CallbackResp, after *config.AfterConfig) {
-	if after.Enable {
-		c.queue.Push(func() { c.post(ctx, command, req, resp, after.Timeout) })
+func (c *Client) AsyncPost(ctx context.Context, command string, req callbackstruct.CallbackReq, resp callbackstruct.CallbackResp, after *config.AfterConfig) error {
+	if !after.Enable {
+		return nil
 	}
+	err := c.queue.Push(func() {
+		if err := c.post(ctx, command, req, resp, after.Timeout); err != nil {
+			log.ZError(ctx, "async webhook callback failed", err, "command", command)
+		}
+	})
+	if err != nil {
+		log.ZError(ctx, "enqueue async webhook callback failed", err, "command", command)
+	}
+	return err
 }
 
-func (c *Client) AsyncPostWithQuery(ctx context.Context, command string, req callbackstruct.CallbackReq, resp callbackstruct.CallbackResp, after *config.AfterConfig, queryParams map[string]string) {
-	if after.Enable {
-		c.queue.Push(func() { c.postWithQuery(ctx, command, req, resp, after.Timeout, queryParams) })
+func (c *Client) AsyncPostWithQuery(ctx context.Context, command string, req callbackstruct.CallbackReq, resp callbackstruct.CallbackResp, after *config.AfterConfig, queryParams map[string]string) error {
+	if !after.Enable {
+		return nil
 	}
+	err := c.queue.Push(func() {
+		if err := c.postWithQuery(ctx, command, req, resp, after.Timeout, queryParams); err != nil {
+			log.ZError(ctx, "async webhook callback failed", err, "command", command)
+		}
+	})
+	if err != nil {
+		log.ZError(ctx, "enqueue async webhook callback failed", err, "command", command)
+	}
+	return err
 }
 
 func (c *Client) post(ctx context.Context, command string, input interface{}, output callbackstruct.CallbackResp, timeout int) error {

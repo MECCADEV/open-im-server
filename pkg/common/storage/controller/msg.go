@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/openimsdk/tools/mq"
 	"github.com/openimsdk/tools/utils/jsonutil"
@@ -41,6 +42,7 @@ import (
 	"github.com/openimsdk/tools/errs"
 	"github.com/openimsdk/tools/log"
 	"github.com/openimsdk/tools/utils/datautil"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 const (
@@ -88,7 +90,9 @@ type CommonMsgDatabase interface {
 	FindOneByDocIDs(ctx context.Context, docIDs []string, seqs map[string]int64) (map[string]*sdkws.MsgData, error)
 
 	// to mq
-	MsgToMQ(ctx context.Context, key string, msg2mq *sdkws.MsgData) error
+	MsgToMQ(ctx context.Context, key string, msg2mq *sdkws.MsgData, payloadHash, idempotencySendID, idempotencyClientMsgID string) (*sdkws.MsgData, error)
+	ReplaySend(ctx context.Context, sendID, clientMsgID, payloadHash string) (*sdkws.MsgData, bool, error)
+	PublishPendingSends(ctx context.Context, limit int64) error
 
 	RangeUserSendCount(ctx context.Context, start time.Time, end time.Time, group bool, ase bool, pageNumber int32, showNumber int32) (msgCount int64, userCount int64, users []*model.UserCount, dateCount map[string]int64, err error)
 	RangeGroupSendCount(ctx context.Context, start time.Time, end time.Time, ase bool, pageNumber int32, showNumber int32) (msgCount int64, userCount int64, groups []*model.GroupCount, dateCount map[string]int64, err error)
@@ -105,9 +109,10 @@ type CommonMsgDatabase interface {
 	GetLastMessage(ctx context.Context, conversationIDS []string, userID string) (map[string]*sdkws.MsgData, error)
 }
 
-func NewCommonMsgDatabase(msgDocModel database.Msg, msg cache.MsgCache, seqUser cache.SeqUser, seqConversation cache.SeqConversationCache, producer mq.Producer) CommonMsgDatabase {
+func NewCommonMsgDatabase(msgDocModel database.Msg, msgSendOutbox database.MsgSendOutbox, msg cache.MsgCache, seqUser cache.SeqUser, seqConversation cache.SeqConversationCache, producer mq.Producer) CommonMsgDatabase {
 	return &commonMsgDatabase{
 		msgDocDatabase:  msgDocModel,
+		msgSendOutbox:   msgSendOutbox,
 		msgCache:        msg,
 		seqUser:         seqUser,
 		seqConversation: seqConversation,
@@ -116,20 +121,200 @@ func NewCommonMsgDatabase(msgDocModel database.Msg, msg cache.MsgCache, seqUser 
 }
 
 type commonMsgDatabase struct {
-	msgDocDatabase  database.Msg
-	msgTable        model.MsgDocModel
-	msgCache        cache.MsgCache
-	seqConversation cache.SeqConversationCache
-	seqUser         cache.SeqUser
-	producer        mq.Producer
+	msgDocDatabase           database.Msg
+	msgSendOutbox            database.MsgSendOutbox
+	msgTable                 model.MsgDocModel
+	msgCache                 cache.MsgCache
+	seqConversation          cache.SeqConversationCache
+	seqUser                  cache.SeqUser
+	producer                 mq.Producer
+	outboxLeaseDuration      time.Duration
+	outboxLeaseRenewInterval time.Duration
 }
 
-func (db *commonMsgDatabase) MsgToMQ(ctx context.Context, key string, msg2mq *sdkws.MsgData) error {
-	data, err := proto.Marshal(msg2mq)
+func (db *commonMsgDatabase) MsgToMQ(ctx context.Context, key string, msg2mq *sdkws.MsgData, payloadHash, idempotencySendID, idempotencyClientMsgID string) (*sdkws.MsgData, error) {
+	if idempotencyClientMsgID == "" {
+		data, err := proto.Marshal(msg2mq)
+		if err != nil {
+			return nil, err
+		}
+		if err := db.producer.SendMessage(ctx, key, data); err != nil {
+			return nil, err
+		}
+		return msg2mq, nil
+	}
+	if db.msgSendOutbox == nil {
+		return nil, errs.ErrInternalServer.WrapMsg("message send outbox is not configured")
+	}
+
+	canonicalRequest := proto.Clone(msg2mq).(*sdkws.MsgData)
+	// Webhook mutation may alter ordinary payload fields, but sender identity
+	// and the idempotency key are the immutable outbox/transfer join key.
+	canonicalRequest.SendID = idempotencySendID
+	canonicalRequest.ClientMsgID = idempotencyClientMsgID
+	data, err := proto.Marshal(canonicalRequest)
+	if err != nil {
+		return nil, err
+	}
+	record := &model.MsgSendOutboxModel{
+		SendID:      idempotencySendID,
+		ClientMsgID: idempotencyClientMsgID,
+		MQKey:       key,
+		PayloadHash: payloadHash,
+		Message:     data,
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := db.msgSendOutbox.Insert(ctx, record); err != nil {
+		if !mongo.IsDuplicateKeyError(errs.Unwrap(err)) {
+			return nil, err
+		}
+		record, err = db.msgSendOutbox.Get(ctx, idempotencySendID, idempotencyClientMsgID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if record.PayloadHash != payloadHash {
+		return nil, errs.ErrArgs.WrapMsg("client message id was already used with a different payload")
+	}
+	canonical := new(sdkws.MsgData)
+	if err := proto.Unmarshal(record.Message, canonical); err != nil {
+		return nil, errs.ErrInternalServer.WrapMsg("stored message outbox payload is invalid", "error", err)
+	}
+	if !record.Published {
+		if err := db.publishOutboxRecord(ctx, record); err != nil {
+			return nil, err
+		}
+	}
+	return canonical, nil
+}
+
+func (db *commonMsgDatabase) ReplaySend(ctx context.Context, sendID, clientMsgID, payloadHash string) (*sdkws.MsgData, bool, error) {
+	if clientMsgID == "" || db.msgSendOutbox == nil {
+		return nil, false, nil
+	}
+	record, err := db.msgSendOutbox.Get(ctx, sendID, clientMsgID)
+	if err != nil {
+		if errors.Is(errs.Unwrap(err), mongo.ErrNoDocuments) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	if record.PayloadHash != payloadHash {
+		return nil, true, errs.ErrArgs.WrapMsg("client message id was already used with a different payload")
+	}
+	if !record.Published {
+		if err := db.publishOutboxRecord(ctx, record); err != nil {
+			return nil, true, err
+		}
+	}
+	canonical := new(sdkws.MsgData)
+	if err := proto.Unmarshal(record.Message, canonical); err != nil {
+		return nil, true, errs.ErrInternalServer.WrapMsg("stored message outbox payload is invalid", "error", err)
+	}
+	return canonical, true, nil
+}
+
+func (db *commonMsgDatabase) PublishPendingSends(ctx context.Context, limit int64) error {
+	if db.msgSendOutbox == nil {
+		return nil
+	}
+	records, err := db.msgSendOutbox.ListUnpublished(ctx, limit)
 	if err != nil {
 		return err
 	}
-	return db.producer.SendMessage(ctx, key, data)
+	for _, record := range records {
+		if err := db.publishOutboxRecord(ctx, record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (db *commonMsgDatabase) publishOutboxRecord(ctx context.Context, record *model.MsgSendOutboxModel) error {
+	leaseDuration := db.outboxLeaseDuration
+	if leaseDuration <= 0 {
+		leaseDuration = 30 * time.Second
+	}
+	renewInterval := db.outboxLeaseRenewInterval
+	if renewInterval <= 0 || renewInterval >= leaseDuration {
+		renewInterval = leaseDuration / 3
+	}
+	for {
+		owner := primitive.NewObjectID().Hex()
+		now := time.Now().UTC()
+		claimed, ok, err := db.msgSendOutbox.TryClaim(ctx, record.SendID, record.ClientMsgID, owner, now, now.Add(leaseDuration))
+		if err != nil {
+			return err
+		}
+		if ok {
+			publishCtx, cancelPublish := context.WithCancel(ctx)
+			renewDone := make(chan struct{})
+			leaseFailure := make(chan error, 1)
+			go func() {
+				defer close(renewDone)
+				ticker := time.NewTicker(renewInterval)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-publishCtx.Done():
+						return
+					case <-ticker.C:
+						now := time.Now().UTC()
+						until := now.Add(leaseDuration)
+						renewed, renewErr := db.msgSendOutbox.RenewClaim(publishCtx, claimed.SendID, claimed.ClientMsgID, owner, now, until)
+						if renewErr != nil {
+							log.ZWarn(ctx, "renew message outbox claim failed", renewErr, "sendID", claimed.SendID, "clientMsgID", claimed.ClientMsgID)
+							leaseFailure <- fmt.Errorf("renew message outbox claim: %w", renewErr)
+							cancelPublish()
+							return
+						}
+						if !renewed {
+							log.ZWarn(ctx, "message outbox claim ownership was lost during publish", nil, "sendID", claimed.SendID, "clientMsgID", claimed.ClientMsgID)
+							leaseFailure <- errors.New("message outbox claim ownership was lost during publish")
+							cancelPublish()
+							return
+						}
+					}
+				}
+			}()
+			publishErr := db.producer.SendMessage(publishCtx, claimed.MQKey, claimed.Message)
+			cancelPublish()
+			<-renewDone
+			var leaseErr error
+			select {
+			case leaseErr = <-leaseFailure:
+			default:
+			}
+			if publishErr != nil {
+				if releaseErr := db.msgSendOutbox.ReleaseClaim(ctx, claimed.SendID, claimed.ClientMsgID, owner); releaseErr != nil {
+					log.ZWarn(ctx, "release message outbox claim failed", releaseErr, "sendID", claimed.SendID, "clientMsgID", claimed.ClientMsgID)
+				}
+				if leaseErr != nil {
+					return leaseErr
+				}
+				return publishErr
+			}
+			if leaseErr != nil {
+				return leaseErr
+			}
+			return db.msgSendOutbox.MarkPublished(ctx, claimed.SendID, claimed.ClientMsgID, owner)
+		}
+
+		latest, err := db.msgSendOutbox.Get(ctx, record.SendID, record.ClientMsgID)
+		if err != nil {
+			return err
+		}
+		if latest.Published {
+			return nil
+		}
+		timer := time.NewTimer(25 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func (db *commonMsgDatabase) batchInsertBlock(ctx context.Context, conversationID string, fields []any, key int8, firstSeq int64) error {

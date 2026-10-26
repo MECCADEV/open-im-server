@@ -16,12 +16,14 @@ package webhook
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 
 	"github.com/openimsdk/open-im-server/v3/pkg/callbackstruct"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/config"
 	pb "github.com/openimsdk/protocol/webhook"
+	"github.com/openimsdk/tools/mq/memamq"
 	"google.golang.org/grpc"
 )
 
@@ -47,5 +49,45 @@ func TestWebhookClientGRPCModeRoundTripsExistingCallbackJSON(t *testing.T) {
 	req := &callbackstruct.CallbackAfterDeleteFriendReq{CallbackCommand: callbackstruct.CallbackAfterDeleteFriendCommand, OwnerUserID: "u1", FriendUserID: "u2"}
 	if err := client.SyncPost(context.Background(), req.GetCallbackCommand(), req, &callbackstruct.CallbackAfterDeleteFriendResp{}, &config.BeforeConfig{Timeout: 2}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAsyncWebhookReportsQueueAdmissionFailure(t *testing.T) {
+	queue := memamq.NewMemoryQueue(1, 1)
+	queue.Stop()
+	client := NewWebhookClient("http://unused.invalid", queue)
+	request := &callbackstruct.CallbackAfterDeleteFriendReq{
+		CallbackCommand: callbackstruct.CallbackAfterDeleteFriendCommand,
+		OwnerUserID:     "u1",
+		FriendUserID:    "u2",
+	}
+	response := &callbackstruct.CallbackAfterDeleteFriendResp{}
+	after := &config.AfterConfig{Enable: true}
+
+	if err := client.AsyncPost(context.Background(), request.GetCallbackCommand(), request, response, after); !errors.Is(err, memamq.ErrStop) {
+		t.Fatalf("AsyncPost error = %v, want %v", err, memamq.ErrStop)
+	}
+	if err := client.AsyncPostWithQuery(context.Background(), request.GetCallbackCommand(), request, response, after, nil); !errors.Is(err, memamq.ErrStop) {
+		t.Fatalf("AsyncPostWithQuery error = %v, want %v", err, memamq.ErrStop)
+	}
+}
+
+func TestDisabledAsyncWebhookDoesNotRequireQueue(t *testing.T) {
+	queue := memamq.NewMemoryQueue(1, 1)
+	queue.Stop()
+	client := NewWebhookClient("http://unused.invalid", queue)
+	request := &callbackstruct.CallbackAfterDeleteFriendReq{
+		CallbackCommand: callbackstruct.CallbackAfterDeleteFriendCommand,
+		OwnerUserID:     "u1",
+		FriendUserID:    "u2",
+	}
+	response := &callbackstruct.CallbackAfterDeleteFriendResp{}
+	after := &config.AfterConfig{Enable: false}
+
+	if err := client.AsyncPost(context.Background(), request.GetCallbackCommand(), request, response, after); err != nil {
+		t.Fatalf("disabled AsyncPost error = %v, want nil", err)
+	}
+	if err := client.AsyncPostWithQuery(context.Background(), request.GetCallbackCommand(), request, response, after, nil); err != nil {
+		t.Fatalf("disabled AsyncPostWithQuery error = %v, want nil", err)
 	}
 }

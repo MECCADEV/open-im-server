@@ -57,7 +57,7 @@ func Start(ctx context.Context, config *Config, client discovery.SvcDiscoveryReg
 		return err
 	}
 	cacheModel := redis.NewThirdCache(rdb)
-	offlinePusher, err := offlinepush.NewOfflinePusher(&config.RpcConfig, cacheModel, string(config.FcmConfigPath))
+	offlinePusher, err := offlinepush.NewOfflinePusher(&config.RpcConfig, cacheModel, string(config.FcmConfigPath), rdb)
 	if err != nil {
 		return err
 	}
@@ -86,6 +86,9 @@ func Start(ctx context.Context, config *Config, client discovery.SvcDiscoveryReg
 	}
 
 	offlineHandler := NewOfflinePushConsumerHandler(offlinePusher)
+	if pendingRunner, ok := offlinePusher.(interface{ RunPendingNotifications(context.Context) }); ok {
+		go pendingRunner.RunPendingNotifications(ctx)
+	}
 
 	pbpush.RegisterPushMsgServiceServer(server, &pushServer{
 		database:      database,
@@ -95,11 +98,13 @@ func Start(ctx context.Context, config *Config, client discovery.SvcDiscoveryReg
 
 	go func() {
 		pushHandler.WaitCache()
+		consumerCtx := mcontext.SetOperationID(ctx, "push_"+strconv.Itoa(int(rand.Uint32())))
 		fn := func(msg mq.Message) error {
-			pushHandler.HandleMs2PsChat(authverify.WithTempAdmin(msg.Context()), msg.Value())
-			return nil
+			messageCtx := authverify.WithTempAdmin(msg.Context())
+			return retryKafkaMessage(consumerCtx, func() error {
+				return pushHandler.HandleMs2PsChat(messageCtx, msg.Value())
+			})
 		}
-		consumerCtx := mcontext.SetOperationID(context.Background(), "push_"+strconv.Itoa(int(rand.Uint32())))
 		log.ZInfo(consumerCtx, "begin consume messages")
 		for {
 			if err := pushConsumer.Subscribe(consumerCtx, fn); err != nil {
@@ -110,11 +115,12 @@ func Start(ctx context.Context, config *Config, client discovery.SvcDiscoveryReg
 	}()
 
 	go func() {
+		consumerCtx := mcontext.SetOperationID(ctx, "push_"+strconv.Itoa(int(rand.Uint32())))
 		fn := func(msg mq.Message) error {
-			offlineHandler.HandleMsg2OfflinePush(msg.Context(), msg.Value())
-			return nil
+			return retryKafkaMessage(consumerCtx, func() error {
+				return offlineHandler.HandleMsg2OfflinePush(msg.Context(), msg.Value())
+			})
 		}
-		consumerCtx := mcontext.SetOperationID(context.Background(), "push_"+strconv.Itoa(int(rand.Uint32())))
 		log.ZInfo(consumerCtx, "begin consume messages")
 		for {
 			if err := offlinePushConsumer.Subscribe(consumerCtx, fn); err != nil {

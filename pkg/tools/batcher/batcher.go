@@ -2,6 +2,7 @@ package batcher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -70,27 +71,25 @@ func WithDataBuffer(size int) Option {
 type Batcher[T any] struct {
 	config *Config
 
-	globalCtx  context.Context
-	cancel     context.CancelFunc
-	Do         func(ctx context.Context, channelID int, val *Msg[T])
-	OnComplete func(lastMessage *T, totalCount int)
-	Sharding   func(key string) int
-	Key        func(data *T) string
-	HookFunc   func(triggerID string, messages map[string][]*T, totalCount int, lastMessage *T)
-	data       chan *T
-	chArrays   []chan *Msg[T]
-	wait       sync.WaitGroup
-	counter    sync.WaitGroup
+	globalCtx   context.Context
+	cancel      context.CancelFunc
+	Do          func(ctx context.Context, channelID int, val *Msg[T])
+	DoWithError func(ctx context.Context, channelID int, val *Msg[T]) error
+	OnComplete  func(messages []*T, err error)
+	Sharding    func(key string) int
+	Key         func(data *T) string
+	HookFunc    func(triggerID string, messages map[string][]*T, totalCount int, lastMessage *T)
+	data        chan *T
+	chArrays    []chan *Msg[T]
+	wait        sync.WaitGroup
 }
 
-func emptyOnComplete[T any](*T, int) {}
 func emptyHookFunc[T any](string, map[string][]*T, int, *T) {
 }
 
 func New[T any](opts ...Option) *Batcher[T] {
 	b := &Batcher[T]{
-		OnComplete: emptyOnComplete[T],
-		HookFunc:   emptyHookFunc[T],
+		HookFunc: emptyHookFunc[T],
 	}
 	config := &Config{
 		size:     DefaultSize,
@@ -121,7 +120,12 @@ func (b *Batcher[T]) Start() error {
 		return errs.New("Sharding function is required").Wrap()
 	}
 	if b.Do == nil {
-		return errs.New("Do function is required").Wrap()
+		if b.DoWithError == nil {
+			return errs.New("Do or DoWithError function is required").Wrap()
+		}
+	}
+	if b.DoWithError != nil && !b.config.syncWait {
+		return errs.New("DoWithError requires synchronous completion").Wrap()
 	}
 	if b.Key == nil {
 		return errs.New("Key function is required").Wrap()
@@ -172,6 +176,7 @@ func (b *Batcher[T]) scheduler() {
 	vals := make(map[string][]*T)
 	count := 0
 	var lastAny *T
+	var orderedMessages []*T
 
 	for {
 		select {
@@ -183,29 +188,32 @@ func (b *Batcher[T]) scheduler() {
 			}
 			if data == nil {
 				if count > 0 {
-					b.distributeMessage(vals, count, lastAny)
+					b.distributeMessage(vals, count, lastAny, orderedMessages)
 				}
 				return
 			}
 
 			key := b.Key(data)
 			vals[key] = append(vals[key], data)
+			orderedMessages = append(orderedMessages, data)
 			lastAny = data
 
 			count++
 			if count >= b.config.size {
 
-				b.distributeMessage(vals, count, lastAny)
+				b.distributeMessage(vals, count, lastAny, orderedMessages)
 				vals = make(map[string][]*T)
 				count = 0
+				orderedMessages = nil
 			}
 
 		case <-ticker.C:
 			if count > 0 {
 
-				b.distributeMessage(vals, count, lastAny)
+				b.distributeMessage(vals, count, lastAny, orderedMessages)
 				vals = make(map[string][]*T)
 				count = 0
+				orderedMessages = nil
 			}
 		}
 	}
@@ -215,6 +223,7 @@ type Msg[T any] struct {
 	key       string
 	triggerID string
 	val       []*T
+	result    chan<- error
 }
 
 func (m Msg[T]) Key() string {
@@ -244,21 +253,31 @@ func (m Msg[T]) String() string {
 	return sb.String()
 }
 
-func (b *Batcher[T]) distributeMessage(messages map[string][]*T, totalCount int, lastMessage *T) {
+func (b *Batcher[T]) distributeMessage(messages map[string][]*T, totalCount int, lastMessage *T, orderedMessages []*T) {
 	triggerID := idutil.OperationIDGenerator()
 	b.HookFunc(triggerID, messages, totalCount, lastMessage)
-	for key, data := range messages {
-		if b.config.syncWait {
-			b.counter.Add(1)
-		}
-		channelID := b.Sharding(key)
-		b.chArrays[channelID] <- &Msg[T]{key: key, triggerID: triggerID, val: data}
-	}
+	var results chan error
 	if b.config.syncWait {
-		b.counter.Wait()
+		results = make(chan error, len(messages))
+	}
+	for key, data := range messages {
+		channelID := b.Sharding(key)
+		b.chArrays[channelID] <- &Msg[T]{key: key, triggerID: triggerID, val: data, result: results}
+	}
+	if results != nil {
+		var completionErr error
+		for range messages {
+			if err := <-results; err != nil {
+				completionErr = errors.Join(completionErr, err)
+			}
+		}
+		if b.OnComplete != nil {
+			b.OnComplete(orderedMessages, completionErr)
+		}
+		return
 	}
 	if b.OnComplete != nil {
-		b.OnComplete(lastMessage, totalCount)
+		b.OnComplete(orderedMessages, nil)
 	}
 }
 
@@ -271,9 +290,14 @@ func (b *Batcher[T]) run(channelID int, ch <-chan *Msg[T]) {
 			if !ok {
 				return
 			}
-			b.Do(ctx, channelID, messages)
-			if b.config.syncWait {
-				b.counter.Done()
+			var err error
+			if b.DoWithError != nil {
+				err = b.DoWithError(ctx, channelID, messages)
+			} else {
+				b.Do(ctx, channelID, messages)
+			}
+			if messages.result != nil {
+				messages.result <- err
 			}
 		}
 	}

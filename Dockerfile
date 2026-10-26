@@ -22,9 +22,9 @@ FROM alpine:latest
 
 WORKDIR /openim-server
 
-COPY --from=builder /openim-server/_output ./_output
-COPY --from=builder /openim-server/config ./config
-COPY --from=builder /openim-server/start-config.yml ./start-config.yml
-COPY --from=builder /openim-server/mage ./mage
+COPY --from=builder /src/openim-server/_output ./_output
+COPY --from=builder /src/openim-server/config ./config
+COPY --from=builder /src/openim-server/start-config.yml ./start-config.yml
+COPY --from=builder /src/openim-server/mage ./mage
 
 ENTRYPOINT ["sh", "-c", "./mage start && sleep infinity"]

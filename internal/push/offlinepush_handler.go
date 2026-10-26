@@ -25,15 +25,15 @@ func NewOfflinePushConsumerHandler(offlinePusher offlinepush.OfflinePusher) *Off
 	}
 }
 
-func (o *OfflinePushConsumerHandler) HandleMsg2OfflinePush(ctx context.Context, msg []byte) {
+func (o *OfflinePushConsumerHandler) HandleMsg2OfflinePush(ctx context.Context, msg []byte) error {
 	offlinePushMsg := pbpush.PushMsgReq{}
 	if err := proto.Unmarshal(msg, &offlinePushMsg); err != nil {
 		log.ZError(ctx, "offline push Unmarshal msg err", err, "msg", string(msg))
-		return
+		return nil
 	}
 	if offlinePushMsg.MsgData == nil || offlinePushMsg.UserIDs == nil {
 		log.ZError(ctx, "offline push msg is empty", errs.New("offlinePushMsg is empty"), "userIDs", offlinePushMsg.UserIDs, "msg", offlinePushMsg.MsgData)
-		return
+		return nil
 	}
 	if offlinePushMsg.MsgData.Status == constant.MsgStatusSending {
 		offlinePushMsg.MsgData.Status = constant.MsgStatusSendSuccess
@@ -44,6 +44,7 @@ func (o *OfflinePushConsumerHandler) HandleMsg2OfflinePush(ctx context.Context, 
 	if err != nil {
 		log.ZWarn(ctx, "offline push failed", err, "msg", offlinePushMsg.String())
 	}
+	return err
 }
 
 func (o *OfflinePushConsumerHandler) getOfflinePushInfos(msg *sdkws.MsgData) (title, content string, opts *options.Opts, err error) {
@@ -88,6 +89,8 @@ func (o *OfflinePushConsumerHandler) getOfflinePushInfos(msg *sdkws.MsgData) (ti
 	if content == "" {
 		content = title
 	}
+	opts.Data = fcmMessageData(msg)
+	opts.MentionedUserIDs = append([]string(nil), msg.AtUserIDList...)
 	return
 }
 

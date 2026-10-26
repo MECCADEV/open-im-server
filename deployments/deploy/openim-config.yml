@@ -209,6 +209,19 @@ data:
       badgeCount: true
       production: false
 
+    # Optional Platform resolver for server-managed notification preferences.
+    # Configure the Platform base URL; inject serviceToken from a Secret and
+    # never store a real token in this ConfigMap. The privacy-preserving
+    # fail-closed mode below is the reference default; override it only when
+    # product policy explicitly accepts sending with unresolved preferences.
+    # When unset, OpenIM uses documented defaults and per-user overrides are
+    # not applied.
+    notificationPreferences:
+      baseURL:
+      serviceToken:
+      timeout: 2s
+      failureMode: fail-closed
+
     fullUserCache: true
 
   openim-rpc-auth.yml: |

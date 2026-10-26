@@ -129,6 +129,9 @@ func Start(ctx context.Context, config *Config, client discovery.SvcDiscoveryReg
 }
 
 func (t *thirdServer) FcmUpdateToken(ctx context.Context, req *third.FcmUpdateTokenReq) (resp *third.FcmUpdateTokenResp, err error) {
+	if err := authverify.CheckAccess(ctx, req.Account); err != nil {
+		return nil, err
+	}
 	err = t.thirdDatabase.FcmUpdateToken(ctx, req.Account, int(req.PlatformID), req.FcmToken, req.ExpireTime)
 	if err != nil {
 		return nil, err

@@ -85,6 +85,10 @@ func Start(ctx context.Context, config *Config, client discovery.SvcDiscoveryReg
 	if err != nil {
 		return err
 	}
+	msgSendOutbox, err := mgo.NewMsgSendOutboxMongo(mgocli.GetDB())
+	if err != nil {
+		return err
+	}
 	msgModel := redis.NewMsgCache(rdb, msgDocModel)
 	seqConversation, err := mgo.NewSeqConversationMongo(mgocli.GetDB())
 	if err != nil {
@@ -96,7 +100,7 @@ func Start(ctx context.Context, config *Config, client discovery.SvcDiscoveryReg
 		return err
 	}
 	seqUserCache := redis.NewSeqUserCacheRedis(rdb, seqUser)
-	msgTransferDatabase, err := controller.NewMsgTransferDatabase(msgDocModel, msgModel, seqUserCache, seqConversationCache, mongoProducer, pushProducer)
+	msgTransferDatabase, err := controller.NewMsgTransferDatabase(msgDocModel, msgSendOutbox, msgModel, seqUserCache, seqConversationCache, mongoProducer, pushProducer)
 	if err != nil {
 		return err
 	}
@@ -140,8 +144,7 @@ func (m *MsgTransfer) Start(ctx context.Context) error {
 
 	go func() {
 		fn := func(msg mq.Message) error {
-			m.historyMongoHandler.HandleChatWs2Mongo(msg)
-			return nil
+			return m.historyMongoHandler.HandleChatWs2Mongo(msg)
 		}
 		for {
 			if err := m.historyMongoConsumer.Subscribe(m.ctx, fn); err != nil {
@@ -158,6 +161,13 @@ func (m *MsgTransfer) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	go func() {
+		select {
+		case err := <-m.historyHandler.batchFailure:
+			cancel(fmt.Errorf("history transfer batch failed: %w", err))
+		case <-m.ctx.Done():
+		}
+	}()
 	<-m.ctx.Done()
 	return context.Cause(m.ctx)
 }
