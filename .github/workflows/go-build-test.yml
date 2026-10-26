@@ -59,6 +59,22 @@ jobs:
             ${{ github.workspace }}/open-im-server/docker-compose.yml
             ${{ github.workspace }}/open-im-server/docker-compose.ci.yml
 
+      - name: Wait for Redis test service
+        run: |
+          for attempt in {1..30}; do
+            if docker exec redis redis-cli -a openIM123 --no-auth-warning ping >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Redis did not become ready for notification coalescer tests" >&2
+          exit 1
+
+      - name: Race-test notification coalescer with Redis
+        env:
+          REDIS_TEST_URL: redis://:openIM123@127.0.0.1:16379/0
+        run: go test -race ./internal/push/offlinepush/fcm ./internal/push/notificationprefs ./internal/notificationstate -count=1
+
       - name: Modify Server Configuration
         run: |
           yq e '.rpc.ports = [10088]' -i config/openim-msggateway.yml
