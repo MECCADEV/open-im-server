@@ -190,13 +190,18 @@ fingerprint and original sender/client ID are captured before callbacks. A
 request matching an existing outbox row skips message validation and
 before-send callbacks after authentication; a conflicting payload is rejected.
 Concurrent first requests can still both execute callbacks before one wins the
-unique insert, and both can reach post-send callbacks after waiting for that
-publish, so callback side effects remain at-least-once and cannot be made
-exactly-once by the outbox alone. Callback consumers that perform durable
-side effects should deduplicate non-empty IDs by `(SendID, ClientMsgID,
-CallbackCommand)`; this contract does not guarantee `OperationID` is stable
-across retries, so it is not the logical-message key. Empty-ID legacy sends
-have no stable callback dedup key.
+unique insert, and both can enqueue post-send callbacks after waiting for that
+publish. This permits duplicate callback effects, but does not guarantee a
+callback is delivered at least once. Before-send callbacks are synchronous;
+after-send callbacks use the webhook client's bounded process-local memory
+queue. Queue admission errors and callback HTTP errors are not returned to the
+send RPC, and queued/in-flight work has no durable restart recovery. Callback
+delivery is therefore best-effort (zero or more attempts), not exactly-once or
+at-least-once. Callback consumers that perform durable side effects should
+deduplicate non-empty IDs by `(SendID, ClientMsgID, CallbackCommand)`; this
+contract does not guarantee `OperationID` is stable across retries, so it is
+not the logical-message key. Empty-ID legacy sends have no stable callback
+dedup key.
 
 For message-send webhook requests, OpenIM's `CommonCallbackReq` JSON exposes
 `sendID`, `clientMsgID`, `callbackCommand`, `serverMsgID`, and `operationID`.
@@ -204,8 +209,9 @@ Use `(sendID, clientMsgID, callbackCommand)` as the consumer idempotency key
 when `clientMsgID` is non-empty. `operationID` identifies a transport attempt
 and must not be part of that key; `serverMsgID` is useful for correlating the
 accepted message but is not the cross-attempt key. This applies to before- and
-after-send callbacks, while not making callback delivery exactly-once. The
-server-side regression test `TestMessageWebhookCarriesStableDeduplicationIdentity`
+after-send callback payloads; stable identity permits receiver deduplication
+but does not make callback delivery durable. The server-side regression test
+`TestMessageWebhookCarriesStableDeduplicationIdentity`
 guards that the stable identity and callback command are present in the shared
 message callback payload.
 
@@ -216,8 +222,9 @@ group-online callback additionally carries the canonical `seq`. Their
 durable side effect should use `(sendID, clientMsgID, callbackCommand)` for a
 non-empty client ID, optionally including the recipient when the effect is
 recipient-specific. Empty legacy client IDs have no stable logical-send key.
-These fields enable receiver-side deduplication; OpenIM callback invocation is
-still at-least-once across replay and is not made exactly-once by this contract.
+These fields enable receiver-side deduplication when a callback arrives, but
+they do not make callback dispatch durable: replay can enqueue duplicates, and
+queue, process, or HTTP failures can result in zero delivery attempts.
 `internal/push/callback_test.go` guards the serialized stable identity and
 attempt-scoped `operationID` for direct and group-online push callbacks.
 A sender-side Mongo outbox also cannot
@@ -269,20 +276,21 @@ must deduplicate by stable message identity. The focused
 handler twice with the same stable message and proves the storage, Mongo-topic,
 and push-topic handoffs each occur twice. It tests the handler boundary, not a
 real Kafka-to-push deployment or the downstream socket/webhook effects; those
-remain at-least-once and require stable receiver-side deduplication.
-The Mongo consumer now invokes the asynchronous after-save webhook only after
-`BatchInsertChat2DB` succeeds; a failed write is left unacknowledged without
-triggering the callback. Decode failures, empty batches, and persistence
-failures now propagate through the Kafka handler into the existing transfer
+remain capable of repeating socket/webhook effects and require stable
+receiver-side deduplication. The Mongo consumer now enqueues the asynchronous
+after-save webhook only after `BatchInsertChat2DB` succeeds; a failed write is
+left unacknowledged without triggering the callback. This enqueue uses the
+same process-local best-effort webhook queue and is not transactionally
+coupled to the Mongo write or Kafka offset. Decode failures, empty batches,
+and persistence failures now propagate through the Kafka handler into the existing transfer
 service cancellation path instead of returning success. The record is not
 marked, and later messages cannot be processed and marked by this service
 instance past it. A restart may retry the record; there is still no dead-letter
 or quarantine policy, so permanent poison data requires operator intervention.
-That callback has no durable delivery checkpoint and
-is not transactionally coupled to Mongo or the Kafka offset, so a crash/replay
-can still duplicate or lose an external callback. Callback consumers must
-deduplicate using the stable message identity; the handler must not be treated
-as exactly-once.
+That callback has no durable delivery checkpoint, so a crash/replay can
+duplicate or lose an external callback. Callback consumers should deduplicate
+using the stable message identity when an event arrives; the handler must not
+be treated as exactly-once or at-least-once.
 Legacy/pre-outbox messages still allocate on each delivery. A permanent
 malformed queue item currently stops the transfer service; a dead-letter or
 quarantine policy is not implemented. Deterministic, real-broker, and real
