@@ -308,6 +308,10 @@ tests must cover duplicate delivery, conflicting payloads, restart after the
 effect is accepted but before the source is acknowledged, and retry after a
 receiver checkpoint failure. These are required future guarantees, not
 behavior implemented by the current transfer, push, or callback consumers.
+The key requires a non-empty `ClientMsgID`; legacy sends without one have no
+stable sender/client identity and must not be automatically retried or
+deduplicated by treating the empty value as a shared key. A future legacy-send
+retry contract must first define and persist another stable logical identity.
 Legacy/pre-outbox messages still allocate on each delivery. A permanent
 malformed queue item currently stops the transfer service; a dead-letter or
 quarantine policy is not implemented. Deterministic, real-broker, and real
