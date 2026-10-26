@@ -163,12 +163,11 @@ func (f *Fcm) push(ctx context.Context, userIDs []string, title, content string,
 			item := pendingNotification{UserID: userID, ConversationID: opts.Data["conversationID"], Title: title, Content: content, Options: *opts}
 			claim, err := f.coalescer.schedule(ctx, userID, item.ConversationID, settings.MaxUpdateFrequencySeconds, item)
 			if err != nil {
-				if f.notificationPreferencesMode == "fail-closed" {
-					return fmt.Errorf("schedule coalesced notification (fail-closed): %w", err)
-				}
-				// Preserve delivery when the shared throttle store is unavailable.
-				immediate = append(immediate, userID)
-				continue
+				// Redis owns the replay filter and update-frequency cap. Sending
+				// around it would violate the recipient's policy, including when
+				// preference lookup itself is configured fail-open. Propagate the
+				// failure to the offline-push retry boundary instead.
+				return fmt.Errorf("schedule coalesced notification: %w", err)
 			}
 			if claim != nil {
 				claims = append(claims, claim)

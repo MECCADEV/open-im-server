@@ -57,11 +57,12 @@ not send to that recipient. Resolver requests make up to three total attempts
 for transient failures; `notificationPreferences.failureMode` is required
 when the resolver is enabled and must be explicitly set to `fail-open` or
 `fail-closed`. Fail-open uses the documented defaults (`all`, default sound,
-2-second frequency cap) if resolution is unavailable; when Redis is healthy,
-those defaults still pass through coalescing and sequence replay suppression.
-If Redis scheduling is also unavailable, fail-open delivers immediately and
-the cap/replay filter is temporarily relaxed. Fail-closed returns an error and
-sends no chat notifications for that push attempt. The push service retries a failing Kafka record in-place
+2-second frequency cap) if resolution is unavailable; those defaults still
+pass through coalescing and sequence replay suppression. Redis scheduling
+failure always returns an error and sends no chat notification for that push
+attempt, regardless of preference resolver failure mode: sending around Redis
+would violate the replay filter and recipient update cap. The push service
+retries a failing Kafka record in-place
 with a capped exponential delay and does not mark it complete until delivery
 succeeds; this also retries resolver errors after their bounded HTTP retries.
 The resolver client does not follow HTTP redirects, so the private service
@@ -135,9 +136,10 @@ otherwise retry sooner. This protects the update cap when FCM accepted an alert
 but its acknowledgement was lost; Redis loss/crash before attempt finalization
 and FCM's external delivery semantics still prevent an exactly-once guarantee.
 The
-coalescer follows the explicitly configured resolver failure mode: fail-open
-sends immediately if Redis is unavailable (temporarily relaxing the cap), and
-fail-closed does not send when it cannot persist scheduling state. Pending
+coalescer does not follow the preference resolver failure mode when Redis is
+unavailable: it always returns an error without sending, preserving the
+recipient's replay filter and frequency cap while the offline-push consumer
+retries the Kafka record. Pending
 inactive coalescer state expires after 30 days without refresh, so production
 Redis must preserve these keys (the repository Helm chart enables AOF and PVCs;
 an operator-provided Redis must configure equivalent persistence/eviction

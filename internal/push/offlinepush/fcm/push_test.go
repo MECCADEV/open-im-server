@@ -507,6 +507,37 @@ func TestCoalescerIsConfiguredWithoutResolverWhenRedisExists(t *testing.T) {
 	}
 }
 
+func TestFailOpenPreferenceResolverDoesNotBypassCoalescerOutage(t *testing.T) {
+	client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	coalescer, err := newNotificationCoalescer(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender := &recordingMessageSender{}
+	push := &Fcm{
+		fcmMsgCli: sender,
+		cache:     notificationTestCache{},
+		notificationPreferences: failingPreferenceResolver{
+			err: errors.New("preference resolver unavailable"),
+		},
+		notificationPreferencesMode: "fail-open",
+		coalescer:                   coalescer,
+	}
+
+	err = push.Push(context.Background(), []string{"recipient-1"}, "title", "body", &options.Opts{
+		Data: map[string]string{"conversationID": "conversation-1"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "schedule coalesced notification") {
+		t.Fatalf("coalescer outage error = %v, want retryable scheduling error", err)
+	}
+	if sender.sent != 0 {
+		t.Fatalf("sent %d alerts while Redis could not enforce the update cap", sender.sent)
+	}
+}
+
 func TestPreferencePresentationMapsSoundToNativeChannels(t *testing.T) {
 	defaultSound, defaultAndroid := preferencePresentation(
 		notificationprefs.EffectiveSettings{Sound: "default"}, "ping.aiff",
