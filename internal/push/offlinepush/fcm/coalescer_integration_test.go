@@ -408,6 +408,77 @@ func TestRedisCoalescerAppliesLongerFrequencyBeforeFlush(t *testing.T) {
 	}
 }
 
+func TestPendingPreviewRechecksChangedFrequencyAndSound(t *testing.T) {
+	client := redisTestClient(t)
+	userID, conversationID := uniqueNotificationKey()
+	stateKey, dueKey := notificationKeys(userID, conversationID)
+	t.Cleanup(func() {
+		_ = client.Del(context.Background(), stateKey).Err()
+		_ = client.ZRem(context.Background(), dueKey, stateKey).Err()
+	})
+
+	now := time.UnixMilli(3_100_000)
+	coalescer, err := newNotificationCoalescer(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coalescer.now = func() time.Time { return now }
+	settings := notificationprefs.DefaultSettings()
+	resolver := &mutablePreferenceResolver{settings: settings}
+	sender := &recordingMessageSender{}
+	push := &Fcm{
+		fcmMsgCli: sender, cache: notificationTestCache{}, coalescer: coalescer,
+		notificationPreferences: resolver,
+	}
+	firstOptions := options.Opts{Data: map[string]string{"conversationID": conversationID, "seq": "1"}}
+	if err := push.Push(context.Background(), []string{userID}, "group", "first", &firstOptions); err != nil {
+		t.Fatalf("send initial group alert: %v", err)
+	}
+	queuedOptions := options.Opts{Data: map[string]string{"conversationID": conversationID, "seq": "2"}}
+	if err := push.Push(context.Background(), []string{userID}, "group", "latest", &queuedOptions); err != nil {
+		t.Fatalf("queue latest group preview: %v", err)
+	}
+	if sender.sent != len(Terminal) {
+		t.Fatalf("initial sends = %d, want %d; latest preview should still be queued", sender.sent, len(Terminal))
+	}
+
+	// The recipient changes settings while the latest preview waits in the
+	// cooldown window. The flush must use the newer, more restrictive settings.
+	settings.Sound = "silent"
+	settings.MaxUpdateFrequencySeconds = 5
+	resolver.settings = settings
+	now = now.Add(2 * time.Second)
+	claim, err := coalescer.claimDue(context.Background())
+	if err != nil || claim == nil || claim.payload.Content != "latest" {
+		t.Fatalf("old-deadline claim = (%+v, %v), want latest pending preview", claim, err)
+	}
+	push.deliverPendingNotification(context.Background(), claim)
+	if sender.sent != len(Terminal) {
+		t.Fatalf("sent at stale 2s deadline = %d, want %d", sender.sent, len(Terminal))
+	}
+	if early, err := coalescer.claimDue(context.Background()); err != nil || early != nil {
+		t.Fatalf("claim before updated 5s cap = (%+v, %v), want none", early, err)
+	}
+
+	now = now.Add(3 * time.Second)
+	claim, err = coalescer.claimDue(context.Background())
+	if err != nil || claim == nil || claim.payload.Content != "latest" {
+		t.Fatalf("updated-deadline claim = (%+v, %v), want latest pending preview", claim, err)
+	}
+	push.deliverPendingNotification(context.Background(), claim)
+	if sender.sent != 2*len(Terminal) {
+		t.Fatalf("sent after updated cap = %d, want %d", sender.sent, 2*len(Terminal))
+	}
+	for _, message := range sender.messages[len(Terminal):] {
+		if message.Android == nil || message.Android.Notification == nil || message.Android.Notification.ChannelID != "chat_messages_silent" {
+			t.Errorf("pending preview Android channel = %+v, want chat_messages_silent", message.Android)
+		}
+		if message.APNS == nil || message.APNS.Payload == nil || message.APNS.Payload.Aps == nil || message.APNS.Payload.Aps.Sound != "" {
+			t.Errorf("pending preview APNs sound = %+v, want silent", message.APNS)
+		}
+	}
+}
+
 func TestRedisCoalescerRetryBackoffKeepsOnlyLatestFailedMessage(t *testing.T) {
 	client := redisTestClient(t)
 	userID, conversationID := uniqueNotificationKey()

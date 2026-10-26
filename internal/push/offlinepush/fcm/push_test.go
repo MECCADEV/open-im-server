@@ -39,12 +39,14 @@ func (r *mutablePreferenceResolver) ResolveWithRetry(_ context.Context, userIDs 
 
 type recordingMessageSender struct {
 	sent     int
+	messages []*messaging.Message
 	response *messaging.BatchResponse
 	err      error
 }
 
 func (s *recordingMessageSender) SendEach(_ context.Context, messages []*messaging.Message) (*messaging.BatchResponse, error) {
 	s.sent += len(messages)
+	s.messages = append(s.messages, messages...)
 	if s.response != nil || s.err != nil {
 		return s.response, s.err
 	}
