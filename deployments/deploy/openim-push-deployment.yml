@@ -28,6 +28,29 @@ spec:
                 secretKeyRef:
                   name: openim-kafka-secret
                   key: kafka-password
+            # Optional Platform resolver wiring. To enable server-managed
+            # preferences, create ConfigMap openim-platform-notification with
+            # base-url and failure-mode keys, and a Secret of the same name
+            # with service-token. The Platform base URL must be the deployed
+            # service origin; OpenIM appends its documented resolver path.
+            - name: IMENV_OPENIM_PUSH_NOTIFICATIONPREFERENCES_BASEURL
+              valueFrom:
+                configMapKeyRef:
+                  name: openim-platform-notification
+                  key: base-url
+                  optional: true
+            - name: IMENV_OPENIM_PUSH_NOTIFICATIONPREFERENCES_FAILUREMODE
+              valueFrom:
+                configMapKeyRef:
+                  name: openim-platform-notification
+                  key: failure-mode
+                  optional: true
+            - name: IMENV_OPENIM_PUSH_NOTIFICATIONPREFERENCES_SERVICETOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: openim-platform-notification
+                  key: service-token
+                  optional: true
           volumeMounts:
             - name: openim-config
               mountPath: "/config"

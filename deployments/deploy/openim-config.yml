@@ -209,6 +209,17 @@ data:
       badgeCount: true
       production: false
 
+    # Optional Platform resolver for server-managed notification preferences.
+    # Configure the Platform base URL and failureMode in the deployment; inject
+    # serviceToken from a Secret and never store a real token in this ConfigMap.
+    # When unset, OpenIM uses documented defaults and per-user overrides are
+    # not applied.
+    notificationPreferences:
+      baseURL:
+      serviceToken:
+      timeout: 2s
+      failureMode:
+
     fullUserCache: true
 
   openim-rpc-auth.yml: |
