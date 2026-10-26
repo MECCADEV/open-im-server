@@ -295,6 +295,19 @@ That callback has no durable delivery checkpoint, so a crash/replay can
 duplicate or lose an external callback. Callback consumers should deduplicate
 using the stable message identity when an event arrives; the handler must not
 be treated as exactly-once or at-least-once.
+
+Required downstream contract before retries can be described as effect-safe:
+each recipient/effect boundary must use a stable identity derived from
+`(SendID, ClientMsgID, recipient ID, effect kind)` and reject a replay whose
+payload fingerprint conflicts with the first accepted event. A receiver that
+owns durable state should persist its inbox identity atomically with that
+state change. Where the effect is an external provider call that cannot share
+that transaction, retain an outbox and require receiver/provider idempotency;
+otherwise document the remaining at-least-once duplicate window. Acceptance
+tests must cover duplicate delivery, conflicting payloads, restart after the
+effect is accepted but before the source is acknowledged, and retry after a
+receiver checkpoint failure. These are required future guarantees, not
+behavior implemented by the current transfer, push, or callback consumers.
 Legacy/pre-outbox messages still allocate on each delivery. A permanent
 malformed queue item currently stops the transfer service; a dead-letter or
 quarantine policy is not implemented. Deterministic, real-broker, and real
