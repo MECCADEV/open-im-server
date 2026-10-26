@@ -432,6 +432,9 @@ func TestApplyConversationReplacementBoundsLongAPNsIdentifier(t *testing.T) {
 		Data: map[string]string{"conversationID": conversationID},
 	})
 	got := message.APNS.Headers["apns-collapse-id"]
+	if want := "chat:24da1b81d0b16df6428eee73c69fcb2a"; got != want {
+		t.Fatalf("long APNs collapse ID = %q, want shared client ID %q", got, want)
+	}
 	if len([]byte(got)) > 64 {
 		t.Fatalf("APNs collapse ID exceeds 64 bytes: %q", got)
 	}
