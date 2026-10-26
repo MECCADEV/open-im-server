@@ -41,3 +41,27 @@ func TestPushNotificationPreferencesEnvironmentOverrides(t *testing.T) {
 		t.Fatalf("environment overrides were not loaded: %+v", push.NotificationPreferences)
 	}
 }
+
+func TestReferenceDeploymentDefaultsNotificationPreferencesToFailClosed(t *testing.T) {
+	configBytes, err := os.ReadFile("../../../deployments/deploy/openim-config.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config struct {
+		Data map[string]string `yaml:"data"`
+	}
+	if err := yaml.Unmarshal(configBytes, &config); err != nil {
+		t.Fatal(err)
+	}
+	pushYAML, ok := config.Data["openim-push.yml"]
+	if !ok {
+		t.Fatal("reference deployment is missing openim-push.yml")
+	}
+	var push Push
+	if err := yaml.Unmarshal([]byte(pushYAML), &push); err != nil {
+		t.Fatal(err)
+	}
+	if got := push.NotificationPreferences.FailureMode; got != "fail-closed" {
+		t.Fatalf("reference deployment failureMode = %q, want fail-closed", got)
+	}
+}

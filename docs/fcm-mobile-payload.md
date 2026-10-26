@@ -75,6 +75,14 @@ retry/defer path. Invalid protobuf payloads are logged and consumed rather than
 blocking the queue, so a dead-letter/quarantine path remains absent. No resolver
 is configured by default, preserving legacy delivery.
 
+The Kubernetes reference ConfigMap sets `failureMode: fail-closed` as a
+privacy-preserving default once the resolver is configured. This is a
+deployment default, not a settled product policy: operators should confirm the
+choice before rollout. Setting `fail-open` is an explicit override that can
+send alerts using defaults while recipient preferences are unavailable; with
+`fail-closed`, resolver failures hold the Kafka record for retry and may delay
+later chat pushes on that consumer.
+
 An FCM per-token `UNREGISTERED` response is terminal: OpenIM removes only that
 recipient's platform-specific registration and does not keep retrying an
 undeliverable token. Other per-token failures remain retryable. `INVALID_ARGUMENT`
