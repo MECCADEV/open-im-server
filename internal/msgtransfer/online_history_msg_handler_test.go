@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -77,6 +78,99 @@ func TestCompleteRedisTransferBatchDoesNotAdvanceAfterEarlierFailure(t *testing.
 	}
 	if second.marked != 0 || second.commits != 0 {
 		t.Fatalf("later message ack counts = (%d, %d), want (0, 0)", second.marked, second.commits)
+	}
+}
+
+func TestSyncWaitFencesLaterRedisBatchAfterEarlierFailure(t *testing.T) {
+	transferErr := errors.New("first transfer batch failed")
+	first := &ackTestMessage{}
+	second := &ackTestMessage{}
+	firstStarted := make(chan struct{})
+	secondStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	completions := make(chan struct {
+		err   error
+		acked bool
+	}, 2)
+	var failed atomic.Bool
+
+	batch := batcher.New[ConsumerMessage](
+		batcher.WithSize(1),
+		batcher.WithWorker(2),
+		batcher.WithBuffer(2),
+		batcher.WithInterval(time.Hour),
+		batcher.WithSyncWait(true),
+	)
+	batch.Key = func(message *ConsumerMessage) string { return message.Key }
+	batch.Sharding = func(key string) int {
+		if key == "first" {
+			return 0
+		}
+		return 1
+	}
+	batch.DoWithError = func(_ context.Context, _ int, message *batcher.Msg[ConsumerMessage]) error {
+		if message.Key() == "first" {
+			close(firstStarted)
+			<-releaseFirst
+			return transferErr
+		}
+		close(secondStarted)
+		return nil
+	}
+	batch.OnComplete = func(messages []*ConsumerMessage, err error) {
+		acked := completeRedisTransferBatch(messages, err, &failed)
+		completions <- struct {
+			err   error
+			acked bool
+		}{err: err, acked: acked}
+	}
+	if err := batch.Start(); err != nil {
+		t.Fatal(err)
+	}
+	var releaseOnce, closeOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseFirst) }) }
+	closeBatch := func() { closeOnce.Do(batch.Close) }
+	t.Cleanup(func() {
+		release()
+		closeBatch()
+	})
+
+	for _, message := range []*ConsumerMessage{
+		{Key: "first", Raw: first},
+		{Key: "second", Raw: second},
+	} {
+		if err := batch.Put(context.Background(), message); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case <-firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first batch did not start")
+	}
+	select {
+	case <-secondStarted:
+		t.Fatal("sync-wait dispatched a later batch before the first batch completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	release()
+	closeBatch()
+	firstCompletion := <-completions
+	secondCompletion := <-completions
+	if !errors.Is(firstCompletion.err, transferErr) || firstCompletion.acked {
+		t.Fatalf("first completion = (%v, acked=%t), want transfer error and no ack", firstCompletion.err, firstCompletion.acked)
+	}
+	if secondCompletion.err != nil || secondCompletion.acked {
+		t.Fatalf("later completion = (%v, acked=%t), want success fenced from ack", secondCompletion.err, secondCompletion.acked)
+	}
+	select {
+	case <-secondStarted:
+	default:
+		t.Fatal("later batch was not drained after the earlier failure")
+	}
+	if first.marked != 0 || first.commits != 0 || second.marked != 0 || second.commits != 0 {
+		t.Fatalf("raw ack calls first=%d/%d second=%d/%d, want no marks or commits", first.marked, first.commits, second.marked, second.commits)
 	}
 }
 

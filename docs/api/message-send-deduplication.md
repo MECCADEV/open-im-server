@@ -85,6 +85,21 @@ leave a sequence gap. A retry/redelivery reuses an assigned outbox sequence,
 but the implementation does not promise gap-free sequences or atomic visibility
 across those stores.
 
+The Redis transfer consumer commits a monotonically increasing watermark, so
+marking a later stream ID is safe only after every earlier delivered entry is
+complete. This handler configures the batcher with `WithSyncWait(true)`: its
+single scheduler waits for every worker in the current batch and invokes
+`OnComplete` before distributing the next batch. The completion callback
+latches the first transfer failure and refuses to mark/commit that batch or
+any later buffered batch. `TestSyncWaitFencesLaterRedisBatchAfterEarlierFailure`
+exercises two separate batches with the first worker held open, then failed;
+30 race-enabled repetitions confirm the later batch cannot advance the
+watermark. This is an acknowledgment-order guarantee for the current consumer
+configuration. It does not suppress downstream side effects already performed
+by buffered work, make transfer effects exactly-once, or solve poison-message
+restart loops; those still require receiver deduplication and an operational
+quarantine policy.
+
 ## Client retry contract today
 
 Clients should create and persist one `ClientMsgID` and the exact send payload
