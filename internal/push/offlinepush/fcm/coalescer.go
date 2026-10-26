@@ -22,7 +22,6 @@ const (
 	coalescerHeartbeat  = 10 * time.Second
 	coalescerRetention  = 30 * 24 * time.Hour
 	coalescerPoll       = 250 * time.Millisecond
-	unsequencedIDLimit  = 128
 )
 
 type pendingNotification struct {
@@ -67,34 +66,20 @@ local payload = ARGV[5]
 local retention = tonumber(ARGV[6])
 local incoming_sequence = ARGV[7]
 local incoming_ids_json = ARGV[8]
-local identity_limit = tonumber(ARGV[9])
 if incoming_ids_json ~= '[]' then
   local incoming_ok, incoming_ids = pcall(cjson.decode, incoming_ids_json)
   if incoming_ok and type(incoming_ids) == 'table' then
-    local recent = {}
-    local recent_json = redis.call('HGET', KEYS[1], 'recent_message_ids')
-    if recent_json then
-      local recent_ok, decoded = pcall(cjson.decode, recent_json)
-      if recent_ok and type(decoded) == 'table' then recent = decoded end
-    end
+    -- Keep aliases for the full coalescer retention window. A fixed-size ring
+    -- can forget a replayed ID while its notification state is still alive.
+    redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', now - retention)
     local duplicate = false
     for _, incoming_id in ipairs(incoming_ids) do
-      for _, seen_id in ipairs(recent) do
-        if incoming_id == seen_id then
-          duplicate = true
-          break
-        end
-      end
+      if redis.call('ZSCORE', KEYS[3], incoming_id) then duplicate = true end
     end
     for _, incoming_id in ipairs(incoming_ids) do
-      local found = false
-      for _, seen_id in ipairs(recent) do
-        if incoming_id == seen_id then found = true; break end
-      end
-      if not found then table.insert(recent, incoming_id) end
+      redis.call('ZADD', KEYS[3], 'NX', now, incoming_id)
     end
-    while #recent > identity_limit do table.remove(recent, 1) end
-    redis.call('HSET', KEYS[1], 'recent_message_ids', cjson.encode(recent))
+    redis.call('PEXPIRE', KEYS[3], retention)
     if duplicate then
       redis.call('PEXPIRE', KEYS[1], retention)
       return {0}
@@ -268,13 +253,14 @@ func (c *notificationCoalescer) schedule(ctx context.Context, userID, conversati
 		return nil, fmt.Errorf("encode notification identities: %w", err)
 	}
 	stateKey, dueKey := notificationKeys(userID, conversationID)
+	messageIDsKey := notificationMessageIDsKey(stateKey)
 	token, err := newLeaseToken()
 	if err != nil {
 		return nil, err
 	}
 	now := c.now().UnixMilli()
-	result, err := scheduleNotificationScript.Run(ctx, c.redis, []string{stateKey, dueKey},
-		now, (time.Duration(settingsFrequency) * time.Second).Milliseconds(), coalescerLease.Milliseconds(), token, string(payload), coalescerRetention.Milliseconds(), notificationSequence(item), string(identities), unsequencedIDLimit).Slice()
+	result, err := scheduleNotificationScript.Run(ctx, c.redis, []string{stateKey, dueKey, messageIDsKey},
+		now, (time.Duration(settingsFrequency) * time.Second).Milliseconds(), coalescerLease.Milliseconds(), token, string(payload), coalescerRetention.Milliseconds(), notificationSequence(item), string(identities)).Slice()
 	if err != nil {
 		return nil, fmt.Errorf("schedule coalesced notification: %w", err)
 	}
@@ -418,6 +404,10 @@ func (c *notificationCoalescer) maintain(ctx context.Context, claims []*notifica
 
 func notificationKeys(userID, conversationID string) (string, string) {
 	return notificationstate.Keys(userID, conversationID)
+}
+
+func notificationMessageIDsKey(stateKey string) string {
+	return stateKey + ":message_ids"
 }
 
 func notificationDueKey(shard int) string {

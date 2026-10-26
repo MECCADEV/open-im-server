@@ -120,12 +120,14 @@ coalescer records the greatest nonzero conversation sequence seen during its
 30-day state lifetime and ignores a replay at or below that sequence. This
 prevents a delayed Kafka replay from replacing a newer pending group preview;
 it does not make provider delivery exactly-once or fence replays after the
-coalescer state expires. The state also keeps the most recent 128 client/server
-message-ID aliases per recipient and conversation; a replay matching either
-alias is suppressed, and a duplicate with newly enriched IDs teaches the
-coalescer the additional alias before the sequence/read-watermark early return.
-This covers unsequenced and mixed-version
-replays; an older unsequenced replay after alias eviction can still show again.
+coalescer state expires. Client/server message-ID aliases are stored in a
+per-recipient/per-conversation Redis sorted set for the same 30-day window,
+with expired members pruned atomically during scheduling. A replay matching
+either alias is suppressed, and a duplicate with newly enriched IDs teaches
+the coalescer the additional alias before the sequence/read-watermark early
+return. This covers unsequenced and mixed-version replays across more than the
+previous 128-alias window. The sorted set grows with message volume during the
+retention window; an unsequenced replay older than 30 days can still show again.
 A provider send error is treated as ambiguous acceptance: the
 coalescer records the attempt and schedules a retry no earlier than the
 recipient's configured frequency interval, even when exponential backoff would

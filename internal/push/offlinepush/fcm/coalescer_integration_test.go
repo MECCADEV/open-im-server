@@ -669,6 +669,58 @@ func TestRedisCoalescerSuppressesUnsequencedReplayAndLearnsEnrichedAliases(t *te
 	}
 }
 
+func TestRedisCoalescerSuppressesUnsequencedReplayAcrossFullRetentionWindow(t *testing.T) {
+	client := redisTestClient(t)
+	userID, conversationID := uniqueNotificationKey()
+	stateKey, dueKey := notificationKeys(userID, conversationID)
+	messageIDsKey := notificationMessageIDsKey(stateKey)
+	t.Cleanup(func() {
+		_ = client.Del(context.Background(), stateKey, messageIDsKey).Err()
+		_ = client.ZRem(context.Background(), dueKey, stateKey).Err()
+	})
+
+	now := time.UnixMilli(4_750_000)
+	coalescer, err := newNotificationCoalescer(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coalescer.now = func() time.Time { return now }
+	var oldest pendingNotification
+	for i := 0; i < 130; i++ {
+		item := pendingNotification{
+			UserID: userID, ConversationID: conversationID,
+			Options: options.Opts{Data: map[string]string{
+				"conversationID": conversationID,
+				"clientMsgID":    fmt.Sprintf("client-%03d", i),
+			}},
+		}
+		if i == 0 {
+			oldest = item
+		}
+		claim, err := coalescer.schedule(context.Background(), userID, conversationID, 2, item)
+		if err != nil || claim == nil {
+			t.Fatalf("schedule message %d = (%+v, %v), want immediate claim", i, claim, err)
+		}
+		if err := coalescer.finish(context.Background(), claim, "sent"); err != nil {
+			t.Fatalf("finish message %d: %v", i, err)
+		}
+		now = now.Add(2 * time.Second)
+	}
+	if count, err := client.ZCard(context.Background(), messageIDsKey).Result(); err != nil || count != 130 {
+		t.Fatalf("retained message aliases = (%d, %v), want 130", count, err)
+	}
+
+	oldest.Content = "replayed after more than 128 newer messages"
+	if replay, err := coalescer.schedule(context.Background(), userID, conversationID, 2, oldest); err != nil || replay != nil {
+		t.Fatalf("old unsequenced replay within retention = (%+v, %v), want suppression", replay, err)
+	}
+
+	now = now.Add(coalescerRetention + time.Millisecond)
+	if expired, err := coalescer.schedule(context.Background(), userID, conversationID, 2, oldest); err != nil || expired == nil {
+		t.Fatalf("old alias after retention = (%+v, %v), want fresh claim", expired, err)
+	}
+}
+
 func TestRedisCoalescerLearnsAliasesBeforeSequenceReplayFilter(t *testing.T) {
 	client := redisTestClient(t)
 	userID, conversationID := uniqueNotificationKey()
