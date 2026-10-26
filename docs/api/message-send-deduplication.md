@@ -194,9 +194,11 @@ unique insert, and both can enqueue post-send callbacks after waiting for that
 publish. This permits duplicate callback effects, but does not guarantee a
 callback is delivered at least once. Before-send callbacks are synchronous;
 after-send callbacks use the webhook client's bounded process-local memory
-queue. Queue admission errors and callback HTTP errors are not returned to the
-send RPC, and queued/in-flight work has no durable restart recovery. Callback
-delivery is therefore best-effort (zero or more attempts), not exactly-once or
+queue. Queue admission errors are returned from the async webhook helper and
+logged, but the message-send handlers do not propagate them to the RPC caller;
+callback HTTP errors are logged by the queue worker and are not retried. Queued
+or in-flight work has no durable restart recovery. Callback delivery is
+therefore best-effort (zero or more attempts), not exactly-once or
 at-least-once. Callback consumers that perform durable side effects should
 deduplicate non-empty IDs by `(SendID, ClientMsgID, CallbackCommand)`; this
 contract does not guarantee `OperationID` is stable across retries, so it is
