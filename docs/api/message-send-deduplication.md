@@ -159,12 +159,13 @@ TEST_MONGODB_URI=mongodb://127.0.0.1:32773 \
 go test -race -count=5 ./pkg/common/storage/controller \
   -run '^TestMsgToMQKafka(CrashWindowIntegration|ProcessCrashIntegration)$'
 ```
-The broker test consumed both identical records after an injected Mongo
-checkpoint failure; the process-crash test terminated the sender after broker
-acknowledgement, recovered from the Mongo outbox, and confirmed the duplicate
-records and final checkpoint. These tests verify the sender outbox boundary;
-they do not test transfer-consumer redelivery, push/webhook delivery, or
-production deployment.
+The broker test used the real Kafka producer/consumer with an injected
+checkpoint error from its test outbox, then consumed both identical records.
+The separate process-crash test used the Mongo outbox, terminated the sender
+after broker acknowledgement, recovered from Mongo, and confirmed the
+duplicate records and final checkpoint. These tests verify the sender outbox
+boundary; they do not test transfer-consumer redelivery, push/webhook delivery,
+or production deployment.
 
 The checked-in defaults select Kafka for the queue (`config/share.yml`) and
 standalone MongoDB (`config/mongodb.yml`). The outbox record uses one Mongo
