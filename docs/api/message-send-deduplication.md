@@ -151,6 +151,21 @@ at-least-once duplicate window, but does not exercise the actual transfer
 consumer, downstream push effects, or deployed behavior. A transient Redis
 lock before publish is insufficient.
 
+On 2026-10-26, both optional integrations passed five race-enabled repetitions
+against disposable Kafka 3.9.1 and MongoDB 7.0.37:
+```sh
+KAFKA_TEST_BROKER=127.0.0.1:19092 \
+TEST_MONGODB_URI=mongodb://127.0.0.1:32773 \
+go test -race -count=5 ./pkg/common/storage/controller \
+  -run '^TestMsgToMQKafka(CrashWindowIntegration|ProcessCrashIntegration)$'
+```
+The broker test consumed both identical records after an injected Mongo
+checkpoint failure; the process-crash test terminated the sender after broker
+acknowledgement, recovered from the Mongo outbox, and confirmed the duplicate
+records and final checkpoint. These tests verify the sender outbox boundary;
+they do not test transfer-consumer redelivery, push/webhook delivery, or
+production deployment.
+
 The checked-in defaults select Kafka for the queue (`config/share.yml`) and
 standalone MongoDB (`config/mongodb.yml`). The outbox record uses one Mongo
 document and a unique compound index; it does not assume Redis Streams or
