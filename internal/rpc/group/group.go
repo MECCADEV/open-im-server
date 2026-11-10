@@ -69,6 +69,47 @@ type groupServer struct {
 	adminUserIDs       []string
 }
 
+const (
+	channelGroupIDPrefix = "ch_"
+	regularGroupIDPrefix = "gp_"
+)
+
+func isChannelGroupID(groupID string) bool {
+	return strings.HasPrefix(groupID, channelGroupIDPrefix)
+}
+
+func regularGroupID(rawID string) string {
+	return regularGroupIDPrefix + rawID
+}
+
+func normalizeRequestedGroupID(groupID string) string {
+	if groupID == "" || isChannelGroupID(groupID) || strings.HasPrefix(groupID, regularGroupIDPrefix) {
+		return groupID
+	}
+	return regularGroupID(groupID)
+}
+
+func validateChannelGroupCreation(groupID string, appAdmin bool) error {
+	if isChannelGroupID(groupID) && !appAdmin {
+		return errs.ErrNoPermission.WrapMsg("channel group IDs may only be created by the application backend")
+	}
+	return nil
+}
+
+func validateChannelUnmute(groupID string) error {
+	if isChannelGroupID(groupID) {
+		return errs.ErrNoPermission.WrapMsg("channel groups must remain muted")
+	}
+	return nil
+}
+
+func channelInitialStatus(groupID string, status int32) int32 {
+	if isChannelGroupID(groupID) {
+		return constant.GroupStatusMuted
+	}
+	return status
+}
+
 type Config struct {
 	RpcConfig          config.Group
 	RedisConfig        config.Redis
@@ -178,6 +219,7 @@ func (g *groupServer) IsNotFound(err error) bool {
 
 func (g *groupServer) GenGroupID(ctx context.Context, groupID *string) error {
 	if *groupID != "" {
+		*groupID = normalizeRequestedGroupID(*groupID)
 		_, err := g.db.TakeGroup(ctx, *groupID)
 		if err == nil {
 			return servererrs.ErrGroupIDExisted.WrapMsg("group id existed " + *groupID)
@@ -191,7 +233,7 @@ func (g *groupServer) GenGroupID(ctx context.Context, groupID *string) error {
 		id := encrypt.Md5(strings.Join([]string{mcontext.GetOperationID(ctx), strconv.FormatInt(time.Now().UnixNano(), 10), strconv.Itoa(rand.Int())}, ",;,"))
 		bi := big.NewInt(0)
 		bi.SetString(id[0:8], 16)
-		id = bi.String()
+		id = regularGroupID(bi.String())
 		_, err := g.db.TakeGroup(ctx, id)
 		if err == nil {
 			continue
@@ -240,9 +282,13 @@ func (g *groupServer) CreateGroup(ctx context.Context, req *pbgroup.CreateGroupR
 
 	var groupMembers []*model.GroupMember
 	group := convert.Pb2DBGroupInfo(req.GroupInfo)
+	if err := validateChannelGroupCreation(group.GroupID, authverify.IsAdmin(ctx)); err != nil {
+		return nil, err
+	}
 	if err := g.GenGroupID(ctx, &group.GroupID); err != nil {
 		return nil, err
 	}
+	group.Status = channelInitialStatus(group.GroupID, group.Status)
 
 	joinGroupFunc := func(userID string, roleLevel int32) {
 		groupMember := &model.GroupMember{
@@ -1586,6 +1632,12 @@ func (g *groupServer) MuteGroup(ctx context.Context, req *pbgroup.MuteGroupReq) 
 }
 
 func (g *groupServer) CancelMuteGroup(ctx context.Context, req *pbgroup.CancelMuteGroupReq) (*pbgroup.CancelMuteGroupResp, error) {
+	// Channel posting restrictions are product policy, not a group role check.
+	// Check this before CheckGroupAdmin so neither group admins nor app admins
+	// can turn posting back on for a channel.
+	if err := validateChannelUnmute(req.GroupID); err != nil {
+		return nil, err
+	}
 	if err := g.CheckGroupAdmin(ctx, req.GroupID); err != nil {
 		return nil, err
 	}
