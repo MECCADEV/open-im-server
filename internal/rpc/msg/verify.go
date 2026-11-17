@@ -18,6 +18,7 @@ import (
 	"context"
 	"math/rand"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/openimsdk/open-im-server/v3/pkg/authverify"
@@ -142,7 +143,9 @@ func (m *msgServer) messageVerification(ctx context.Context, data *msg.SendMsgRe
 
 func (m *msgServer) encapsulateMsgData(msg *sdkws.MsgData) {
 	msg.ServerMsgID = GetMsgID(msg.SendID)
-	if msg.SendTime == 0 {
+	if isChannelGroupMessage(msg) {
+		setChannelMessageSendTime(msg)
+	} else if msg.SendTime == 0 {
 		msg.SendTime = timeutil.GetCurrentTimestampByMill()
 	}
 	switch msg.ContentType {
@@ -165,6 +168,18 @@ func (m *msgServer) encapsulateMsgData(msg *sdkws.MsgData) {
 		datautil.SetSwitchFromOptions(msg.Options, constant.IsSenderConversationUpdate, false)
 		datautil.SetSwitchFromOptions(msg.Options, constant.IsUnreadCount, false)
 		datautil.SetSwitchFromOptions(msg.Options, constant.IsOfflinePush, false)
+	}
+}
+
+func isChannelGroupMessage(msg *sdkws.MsgData) bool {
+	return msg != nil && msg.SessionType == constant.ReadGroupChatType && strings.HasPrefix(msg.GroupID, "ch_")
+}
+
+func setChannelMessageSendTime(msg *sdkws.MsgData) {
+	if isChannelGroupMessage(msg) {
+		// Channel retention is measured from server acceptance time. Do not let
+		// a client or a before-send webhook backdate a channel post.
+		msg.SendTime = timeutil.GetCurrentTimestampByMill()
 	}
 }
 
