@@ -32,6 +32,15 @@ func NewMsgMongo(db *mongo.Database) (database.Msg, error) {
 	if err != nil {
 		return nil, errs.Wrap(err)
 	}
+	_, err = coll.Indexes().CreateOne(context.Background(), mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "msgs.msg.group_id", Value: 1},
+			{Key: "msgs.msg.send_time", Value: 1},
+		},
+	})
+	if err != nil {
+		return nil, errs.Wrap(err)
+	}
 	return &MsgMgo{coll: coll}, nil
 }
 
@@ -945,6 +954,37 @@ func (m *MsgMgo) GetRandBeforeMsg(ctx context.Context, ts int64, limit int) ([]*
 			},
 		},
 	})
+}
+
+// FindExpiredChannelMessages returns message documents containing channel posts
+// older than the supplied server-time cutoff. The retention worker filters each
+// projected sequence again before deleting it, so non-channel messages and
+// newer messages sharing the same document are preserved.
+func (m *MsgMgo) FindExpiredChannelMessages(ctx context.Context, cutoffMillis int64, limit int64) ([]*model.MsgDocModel, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	filter := bson.M{
+		"msgs": bson.M{
+			"$elemMatch": bson.M{
+				"msg.group_id":  bson.M{"$regex": "^ch_"},
+				"msg.send_time": bson.M{"$lte": cutoffMillis},
+			},
+		},
+	}
+	options := options.Find().
+		SetLimit(limit).
+		SetSort(bson.D{{Key: "doc_id", Value: 1}}).
+		SetProjection(bson.M{
+			"_id":                   0,
+			"doc_id":                1,
+			"msgs.msg.group_id":     1,
+			"msgs.msg.session_type": 1,
+			"msgs.msg.send_time":    1,
+			"msgs.msg.seq":          1,
+			"msgs.msg.send_id":      1,
+		})
+	return mongoutil.Find[*model.MsgDocModel](ctx, m.coll, filter, options)
 }
 
 func (m *MsgMgo) DeleteDoc(ctx context.Context, docID string) error {

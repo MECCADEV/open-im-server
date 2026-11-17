@@ -1,0 +1,31 @@
+{
+  "plan": "channel-server-retention",
+  "plan_doc": "00-plan.md",
+  "source_task": "Implement server-side channel post retention requested by the user",
+  "status": "in_progress",
+  "updated": "2026-11-17",
+  "completed": [
+    "Confirm no authoritative per-member delivery acknowledgment exists; use bounded 24-hour server-time fallback.",
+    "Add server-assigned channel send time, indexed expired-channel query, and locked cleanup worker in openim-rpc-msg.",
+    "Add unit coverage for server timestamp enforcement and channel-only cutoff filtering."
+  ],
+  "pending": [
+    {
+      "phase": "workflow_and_api_contract",
+      "order": 1,
+      "tier": 2,
+      "status": "in_progress",
+      "description": "Extend the existing production guarded workflow to test/build/deploy group and message RPCs, and document server retention.",
+      "verification": "Workflow diff passes lint/review and channel API docs match the retention behavior."
+    },
+    {
+      "phase": "e2e_and_deploy",
+      "order": 2,
+      "tier": "runtime_gate",
+      "status": "not_started",
+      "description": "Run the channel retention verification matrix and deploy through the existing workflow.",
+      "matrix_ref": "00-plan.md#verification-matrix",
+      "harness": "OpenIM channel/platform E2E harness"
+    }
+  ]
+}

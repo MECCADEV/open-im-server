@@ -109,6 +109,7 @@ func (m *msgServer) sendMsgGroupChat(ctx context.Context, req *pbmsg.SendMsgReq,
 	if err := m.webhookBeforeMsgModify(ctx, &m.config.WebhooksConfig.BeforeMsgModify, req, before); err != nil {
 		return nil, err
 	}
+	setChannelMessageSendTime(req.MsgData)
 	req.MsgData, err = m.MsgDatabase.MsgToMQ(ctx, conversationutil.GenConversationUniqueKeyForGroup(req.MsgData.GroupID), req.MsgData, payloadHash, identity.sendID, identity.clientMsgID)
 	if err != nil {
 		return nil, err

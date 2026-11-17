@@ -25,6 +25,7 @@ import (
 	"github.com/openimsdk/open-im-server/v3/pkg/rpcli"
 
 	"github.com/openimsdk/open-im-server/v3/internal/notificationstate"
+	"github.com/openimsdk/open-im-server/v3/internal/tools/cron"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/config"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/storage/cache/redis"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/storage/controller"
@@ -75,6 +76,8 @@ type msgServer struct {
 
 	adminUserIDs                []string
 	notificationReadWatermarker notificationReadAdvancer
+	channelRetentionStore       expiredChannelMessageStore
+	channelRetentionLocker      channelMessageRetentionLocker
 }
 
 type notificationReadAdvancer interface {
@@ -153,6 +156,8 @@ func Start(ctx context.Context, config *Config, client discovery.SvcDiscoveryReg
 		conversationClient:          conversationClient,
 		adminUserIDs:                config.Share.IMAdminUser.UserIDs,
 		notificationReadWatermarker: notificationstate.NewWatermarker(rdb),
+		channelRetentionStore:       channelMessageStoreFrom(msgDocModel),
+		channelRetentionLocker:      cron.NewRedisLocker(rdb),
 	}
 
 	s.notificationSender = notification.NewNotificationSender(&config.NotificationConfig, notification.WithLocalSendMsg(s.SendMsg))
@@ -160,6 +165,7 @@ func Start(ctx context.Context, config *Config, client discovery.SvcDiscoveryReg
 
 	msg.RegisterMsgServer(server, s)
 	go s.resumePendingSends(ctx)
+	go s.runChannelMessageRetention(ctx)
 
 	return nil
 }
