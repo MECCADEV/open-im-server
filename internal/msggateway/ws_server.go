@@ -24,6 +24,7 @@ import (
 	"github.com/openimsdk/open-im-server/v3/pkg/common/servererrs"
 	"github.com/openimsdk/protocol/constant"
 	"github.com/openimsdk/protocol/msggateway"
+	"github.com/openimsdk/protocol/relation"
 	"github.com/openimsdk/tools/discovery"
 	"github.com/openimsdk/tools/log"
 	"github.com/redis/go-redis/v9"
@@ -73,6 +74,7 @@ type WsServer struct {
 	webhookClient *webhook.Client
 	userClient    *rpcli.UserClient
 	authClient    *rpcli.AuthClient
+	friendClient  relation.FriendClient
 
 	ready atomic.Bool
 }
@@ -96,12 +98,17 @@ func (ws *WsServer) SetDiscoveryRegistry(ctx context.Context, disCov discovery.C
 	if err != nil {
 		return err
 	}
+	friendConn, err := disCov.GetConn(ctx, config.Discovery.RpcService.Friend)
+	if err != nil {
+		return err
+	}
 	msgConn, err := disCov.GetConn(ctx, config.Discovery.RpcService.Msg)
 	if err != nil {
 		return err
 	}
 	ws.userClient = rpcli.NewUserClient(userConn)
 	ws.authClient = rpcli.NewAuthClient(authConn)
+	ws.friendClient = rpcli.NewRelationClient(friendConn).FriendClient
 	ws.MessageHandler = NewGrpcHandler(ws.validate, rpcli.NewMsgClient(msgConn), rpcli.NewPushMsgServiceClient(pushConn))
 	ws.disCov = disCov
 

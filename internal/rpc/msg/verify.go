@@ -39,6 +39,21 @@ type Validator interface {
 	validate(pb *msg.SendMsgReq) (bool, int32, string)
 }
 
+type blackChecker interface {
+	IsBlack(context.Context, string, string) (bool, error)
+}
+
+func verifyPeerBlock(ctx context.Context, checker blackChecker, senderID, receiverID string) error {
+	blocked, err := checker.IsBlack(ctx, senderID, receiverID)
+	if err != nil {
+		return err
+	}
+	if blocked {
+		return servererrs.ErrBlockedByPeer.Wrap()
+	}
+	return nil
+}
+
 type MessageRevoked struct {
 	RevokerID                   string `json:"revokerID"`
 	RevokerRole                 int32  `json:"revokerRole"`
@@ -60,7 +75,11 @@ func (m *msgServer) messageVerification(ctx context.Context, data *msg.SendMsgRe
 		}
 		if data.MsgData.ContentType <= constant.NotificationEnd &&
 			data.MsgData.ContentType >= constant.NotificationBegin {
-			return nil
+			// Receipts, typing signals, and other system messages are still
+			// deliveries between users. Apply the recipient's block before the
+			// notification fast path so they cannot reveal activity or bypass a
+			// block.
+			return verifyPeerBlock(ctx, m.FriendLocalCache, data.MsgData.SendID, data.MsgData.RecvID)
 		}
 		if err := m.webhookBeforeSendSingleMsg(ctx, &m.config.WebhooksConfig.BeforeSendSingleMsg, data); err != nil {
 			return err
@@ -72,12 +91,8 @@ func (m *msgServer) messageVerification(ctx context.Context, data *msg.SendMsgRe
 		if authverify.CheckSystemAccount(ctx, u.AppMangerLevel) {
 			return nil
 		}
-		black, err := m.FriendLocalCache.IsBlack(ctx, data.MsgData.SendID, data.MsgData.RecvID)
-		if err != nil {
+		if err := verifyPeerBlock(ctx, m.FriendLocalCache, data.MsgData.SendID, data.MsgData.RecvID); err != nil {
 			return err
-		}
-		if black {
-			return servererrs.ErrBlockedByPeer.Wrap()
 		}
 		if m.config.RpcConfig.FriendVerify {
 			friend, err := m.FriendLocalCache.IsFriend(ctx, data.MsgData.SendID, data.MsgData.RecvID)
