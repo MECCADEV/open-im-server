@@ -10,5 +10,6 @@ FROM alpine:3.22
 RUN apk add --no-cache ca-certificates
 WORKDIR /openim/openim-server
 COPY --from=builder /out/openim-api ./_output/openim-api
+COPY --from=builder /src/open-im-server/config ./config
 ENV BINARY_NAME=openim-api
 ENTRYPOINT ["sh", "-c", "_output/${BINARY_NAME}"]
