@@ -11,5 +11,7 @@ RUN apk add --no-cache ca-certificates
 WORKDIR /openim/openim-server
 COPY --from=builder /out/openim-api ./_output/openim-api
 COPY --from=builder /src/open-im-server/config ./config
+# Match the production Kafka service and topics used by the deployed chart.
+RUN sed -i 's/localhost:19094/im-kafka:9092/; s/^toRedisTopic:.*/toRedisTopic: latestMsgToRedis/; s/^toMongoTopic:.*/toMongoTopic: offlineMsgToMongoMysql/; s/^toPushTopic:.*/toPushTopic: msgToPush/' ./config/kafka.yml
 ENV BINARY_NAME=openim-api
 ENTRYPOINT ["sh", "-c", "_output/${BINARY_NAME}"]
