@@ -11,4 +11,5 @@ RUN apk add --no-cache ca-certificates
 WORKDIR /openim/openim-server
 COPY --from=builder /out/openim-api ./_output/openim-api
 ENV BINARY_NAME=openim-api
+ENV CONFIG_PATH=/openim/openim-server/config
 ENTRYPOINT ["sh", "-c", "_output/${BINARY_NAME}"]
