@@ -15,8 +15,11 @@
 package api
 
 import (
+	"context"
+
 	"github.com/gin-gonic/gin"
 
+	"github.com/openimsdk/open-im-server/v3/pkg/authverify"
 	"github.com/openimsdk/protocol/relation"
 	"github.com/openimsdk/tools/a2r"
 )
@@ -71,6 +74,54 @@ func (o *FriendApi) AddBlack(c *gin.Context) {
 
 func (o *FriendApi) GetPaginationBlacks(c *gin.Context) {
 	a2r.Call(c, relation.FriendClient.GetPaginationBlacks, o.Client)
+}
+
+// IsBlack returns the directional blacklist state for two OpenIM users. This
+// route is used by trusted Platform services to avoid exposing incoming block
+// lists to clients.
+func (o *FriendApi) IsBlack(c *gin.Context) {
+	if !authverify.IsAdmin(c) {
+		c.JSON(403, gin.H{"errCode": 403, "errMsg": "admin access required"})
+		return
+	}
+	a2r.Call(c, relation.FriendClient.IsBlack, o.Client)
+}
+
+// IsBlackBatch checks whether the supplied target accounts have blocked one
+// viewer. This is an internal service route; it returns per-target booleans,
+// not a list of the viewer's incoming blockers.
+func (o *FriendApi) IsBlackBatch(c *gin.Context) {
+	if !authverify.IsAdmin(c) {
+		c.JSON(403, gin.H{"errCode": 403, "errMsg": "admin access required"})
+		return
+	}
+	var request struct {
+		ViewerUserID  string   `json:"viewerUserID" binding:"required"`
+		TargetUserIDs []string `json:"targetUserIDs" binding:"required,min=1,max=1000,dive,required"`
+	}
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(400, gin.H{"errCode": 400, "errMsg": "invalid block status request"})
+		return
+	}
+	type status struct {
+		UserID  string `json:"userID"`
+		Blocked bool   `json:"blocked"`
+	}
+	statuses := make([]status, 0, len(request.TargetUserIDs))
+	seen := make(map[string]struct{}, len(request.TargetUserIDs))
+	for _, targetUserID := range request.TargetUserIDs {
+		if _, exists := seen[targetUserID]; exists {
+			continue
+		}
+		seen[targetUserID] = struct{}{}
+		response, err := o.Client.IsBlack(context.Context(c), &relation.IsBlackReq{UserID1: targetUserID, UserID2: request.ViewerUserID})
+		if err != nil {
+			c.JSON(502, gin.H{"errCode": 502, "errMsg": "could not check block status"})
+			return
+		}
+		statuses = append(statuses, status{UserID: targetUserID, Blocked: response.InUser1Blacks})
+	}
+	c.JSON(200, gin.H{"errCode": 0, "data": gin.H{"statuses": statuses}})
 }
 
 func (o *FriendApi) GetSpecifiedBlacks(c *gin.Context) {

@@ -168,6 +168,8 @@ func newGinRouter(ctx context.Context, client discovery.SvcDiscoveryRegistry, cf
 		friendRouterGroup.POST("/set_friend_remark", f.SetFriendRemark)
 		friendRouterGroup.POST("/add_black", f.AddBlack)
 		friendRouterGroup.POST("/get_black_list", f.GetPaginationBlacks)
+		friendRouterGroup.POST("/is_black", f.IsBlack)
+		friendRouterGroup.POST("/is_black_batch", f.IsBlackBatch)
 		friendRouterGroup.POST("/get_specified_blacks", f.GetSpecifiedBlacks)
 		friendRouterGroup.POST("/remove_black", f.RemoveBlack)
 		friendRouterGroup.POST("/get_incremental_blacks", f.GetIncrementalBlacks)
