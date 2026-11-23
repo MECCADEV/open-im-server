@@ -2,11 +2,15 @@ package msggateway
 
 import (
 	"context"
+	"errors"
+	"sync"
+
+	"github.com/openimsdk/protocol/relation"
 	"github.com/openimsdk/protocol/sdkws"
 	"github.com/openimsdk/tools/log"
+	"github.com/openimsdk/tools/mcontext"
 	"github.com/openimsdk/tools/utils/datautil"
 	"google.golang.org/protobuf/proto"
-	"sync"
 )
 
 func (ws *WsServer) subscriberUserOnlineStatusChanges(ctx context.Context, userID string, platformIDs []int32) {
@@ -23,11 +27,22 @@ func (ws *WsServer) SubUserOnlineStatus(ctx context.Context, client *Client, dat
 	if err := proto.Unmarshal(data.Data, &sub); err != nil {
 		return nil, err
 	}
-	ws.subscription.Sub(client, sub.SubscribeUserID, sub.UnsubscribeUserID)
+	visibleUserIDs := make([]string, 0, len(sub.SubscribeUserID))
+	for _, userID := range sub.SubscribeUserID {
+		blocked, err := ws.userBlockedBy(ctx, userID, client.UserID)
+		if err != nil {
+			log.ZWarn(ctx, "online status subscription visibility check failed", err, "userID", userID, "viewerUserID", client.UserID)
+			continue
+		}
+		if !blocked {
+			visibleUserIDs = append(visibleUserIDs, userID)
+		}
+	}
+	ws.subscription.Sub(client, visibleUserIDs, sub.UnsubscribeUserID)
 	var resp sdkws.SubUserOnlineStatusTips
-	if len(sub.SubscribeUserID) > 0 {
-		resp.Subscribers = make([]*sdkws.SubUserOnlineStatusElem, 0, len(sub.SubscribeUserID))
-		for _, userID := range sub.SubscribeUserID {
+	if len(visibleUserIDs) > 0 {
+		resp.Subscribers = make([]*sdkws.SubUserOnlineStatusElem, 0, len(visibleUserIDs))
+		for _, userID := range visibleUserIDs {
 			platformIDs, err := ws.online.GetUserOnlinePlatform(ctx, userID)
 			if err != nil {
 				return nil, err
@@ -39,6 +54,23 @@ func (ws *WsServer) SubUserOnlineStatus(ctx context.Context, client *Client, dat
 		}
 	}
 	return proto.Marshal(&resp)
+}
+
+// userBlockedBy checks whether ownerUserID has blocked viewerUserID. Presence
+// checks bypass the message cache so an unblock takes effect immediately.
+func (ws *WsServer) userBlockedBy(ctx context.Context, ownerUserID, viewerUserID string) (bool, error) {
+	if ownerUserID == "" || viewerUserID == "" || ownerUserID == viewerUserID {
+		return false, nil
+	}
+	if ws.friendClient == nil {
+		return false, errors.New("friend status client is unavailable")
+	}
+	ctx = mcontext.WithOpUserIDContext(ctx, viewerUserID)
+	status, err := ws.friendClient.IsBlack(ctx, &relation.IsBlackReq{UserID1: ownerUserID, UserID2: viewerUserID})
+	if err != nil {
+		return false, err
+	}
+	return status.InUser1Blacks, nil
 }
 
 func newSubscription() *Subscription {
@@ -159,6 +191,14 @@ func (ws *WsServer) pushUserIDOnlineStatus(ctx context.Context, userID string, p
 		return
 	}
 	for _, client := range clients {
+		blocked, err := ws.userBlockedBy(ctx, userID, client.UserID)
+		if err != nil {
+			log.ZWarn(ctx, "online status delivery visibility check failed", err, "userID", userID, "viewerUserID", client.UserID)
+			continue
+		}
+		if blocked {
+			continue
+		}
 		if err := client.PushUserOnlineStatus(onlineStatus); err != nil {
 			log.ZError(ctx, "UserSubscribeOnlineStatusNotification push failed", err, "userID", client.UserID, "platformID", client.PlatformID, "changeUserID", userID, "changePlatformID", platformIDs)
 		}

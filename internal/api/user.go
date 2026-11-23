@@ -15,26 +15,55 @@
 package api
 
 import (
+	"context"
+	"fmt"
+
 	"github.com/gin-gonic/gin"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/config"
 	"github.com/openimsdk/protocol/constant"
 	"github.com/openimsdk/protocol/msggateway"
+	"github.com/openimsdk/protocol/relation"
 	"github.com/openimsdk/protocol/user"
 	"github.com/openimsdk/tools/a2r"
 	"github.com/openimsdk/tools/apiresp"
 	"github.com/openimsdk/tools/discovery"
 	"github.com/openimsdk/tools/errs"
 	"github.com/openimsdk/tools/log"
+	"github.com/openimsdk/tools/mcontext"
 )
 
 type UserApi struct {
-	Client user.UserClient
-	discov discovery.Conn
-	config config.RpcService
+	Client       user.UserClient
+	friendClient relation.FriendClient
+	discov       discovery.Conn
+	config       config.RpcService
 }
 
-func NewUserApi(client user.UserClient, discov discovery.Conn, config config.RpcService) UserApi {
-	return UserApi{Client: client, discov: discov, config: config}
+func NewUserApi(client user.UserClient, friendClient relation.FriendClient, discov discovery.Conn, config config.RpcService) UserApi {
+	return UserApi{Client: client, friendClient: friendClient, discov: discov, config: config}
+}
+
+// visibleUserIDs removes accounts that blocked the authenticated requester.
+// A failed status check fails closed so presence data is never leaked.
+func (u *UserApi) visibleUserIDs(ctx context.Context, requesterID string, userIDs []string) ([]string, error) {
+	if requesterID == "" || u.friendClient == nil {
+		return nil, fmt.Errorf("requester block status is unavailable")
+	}
+	visible := make([]string, 0, len(userIDs))
+	for _, targetID := range userIDs {
+		if targetID == requesterID {
+			visible = append(visible, targetID)
+			continue
+		}
+		status, err := u.friendClient.IsBlack(ctx, &relation.IsBlackReq{UserID1: targetID, UserID2: requesterID})
+		if err != nil {
+			return nil, fmt.Errorf("check presence visibility for %s: %w", targetID, err)
+		}
+		if !status.InUser1Blacks {
+			visible = append(visible, targetID)
+		}
+	}
+	return visible, nil
 }
 
 func (u *UserApi) UserRegister(c *gin.Context) {
@@ -74,6 +103,16 @@ func (u *UserApi) GetUsersOnlineStatus(c *gin.Context) {
 	var req msggateway.GetUsersOnlineStatusReq
 	if err := c.BindJSON(&req); err != nil {
 		apiresp.GinError(c, err)
+		return
+	}
+	visibleIDs, err := u.visibleUserIDs(c, mcontext.GetOpUserID(c), req.UserIDs)
+	if err != nil {
+		apiresp.GinError(c, err)
+		return
+	}
+	req.UserIDs = visibleIDs
+	if len(req.UserIDs) == 0 {
+		apiresp.GinSuccess(c, []*msggateway.GetUsersOnlineStatusResp_SuccessResult{})
 		return
 	}
 	conns, err := u.discov.GetConns(c, u.config.MessageGateway)
@@ -140,6 +179,16 @@ func (u *UserApi) GetUsersOnlineTokenDetail(c *gin.Context) {
 		apiresp.GinError(c, errs.ErrArgs.WithDetail(err.Error()).Wrap())
 		return
 	}
+	var err error
+	req.UserIDs, err = u.visibleUserIDs(c, mcontext.GetOpUserID(c), req.UserIDs)
+	if err != nil {
+		apiresp.GinError(c, err)
+		return
+	}
+	if len(req.UserIDs) == 0 {
+		apiresp.GinSuccess(c, []*msggateway.SingleDetail{})
+		return
+	}
 	conns, err := u.discov.GetConns(c, u.config.MessageGateway)
 	if err != nil {
 		apiresp.GinError(c, err)
@@ -198,7 +247,23 @@ func (u *UserApi) SubscriberStatus(c *gin.Context) {
 
 // GetUserStatus Get the online status of the user.
 func (u *UserApi) GetUserStatus(c *gin.Context) {
-	a2r.Call(c, user.UserClient.GetUserStatus, u.Client)
+	var req user.GetUserStatusReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		apiresp.GinError(c, err)
+		return
+	}
+	visibleIDs, err := u.visibleUserIDs(c, mcontext.GetOpUserID(c), req.UserIDs)
+	if err != nil {
+		apiresp.GinError(c, err)
+		return
+	}
+	req.UserIDs = visibleIDs
+	resp, err := u.Client.GetUserStatus(c, &req)
+	if err != nil {
+		apiresp.GinError(c, err)
+		return
+	}
+	apiresp.GinSuccess(c, resp)
 }
 
 // GetSubscribeUsersStatus Get the online status of subscribers.
