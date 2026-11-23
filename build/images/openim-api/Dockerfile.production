@@ -1,0 +1,14 @@
+FROM golang:1.25-alpine AS builder
+WORKDIR /src/open-im-server
+COPY open-im-server/go.mod open-im-server/go.sum ./
+COPY openim-protocol /src/openim-protocol
+RUN go mod download
+COPY open-im-server/ ./
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/openim-api ./cmd/openim-api
+
+FROM alpine:3.22
+RUN apk add --no-cache ca-certificates
+WORKDIR /openim/openim-server
+COPY --from=builder /out/openim-api ./_output/openim-api
+ENV BINARY_NAME=openim-api
+ENTRYPOINT ["sh", "-c", "_output/${BINARY_NAME}"]

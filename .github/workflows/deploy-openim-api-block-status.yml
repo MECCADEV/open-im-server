@@ -1,0 +1,153 @@
+name: Deploy OpenIM API block status route
+
+on:
+  workflow_dispatch:
+    inputs:
+      openim_ref:
+        description: OpenIM ref to build and deploy
+        required: true
+        default: codex/incoming-block-status
+        type: string
+      image_tag:
+        description: Optional immutable image tag
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openim-api-production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 25
+    steps:
+      - name: Check out OpenIM source
+        uses: actions/checkout@v4
+        with:
+          repository: MECCADEV/open-im-server
+          ref: ${{ inputs.openim_ref }}
+          path: open-im-server
+          fetch-depth: 1
+
+      - name: Check out the deployed protocol fork
+        uses: actions/checkout@v4
+        with:
+          repository: MECCADEV/protocol
+          ref: 1bf4e77f4476661dd503f901fd0f65d66d66fa70
+          path: openim-protocol
+          fetch-depth: 1
+
+      - name: Resolve source revision
+        id: source
+        working-directory: open-im-server
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: open-im-server/go.mod
+          cache: true
+          cache-dependency-path: open-im-server/go.sum
+
+      - name: Test OpenIM API route
+        working-directory: open-im-server
+        run: go test ./internal/api
+
+      - name: Fetch deployment credentials from Vault
+        id: vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: https://vault.meainternal.com
+          token: ${{ secrets.VAULT_TOKEN }}
+          secrets: |
+            secret/data/pingmessenger/platform/deploy REGISTRY_USER | REGISTRY_USER ;
+            secret/data/pingmessenger/platform/deploy REGISTRY_PASSWORD | REGISTRY_PASSWORD ;
+            secret/data/pingmessenger/platform/deploy AWS_ACCESS_KEY_ID | AWS_ACCESS_KEY_ID ;
+            secret/data/pingmessenger/platform/deploy AWS_SECRET_ACCESS_KEY | AWS_SECRET_ACCESS_KEY ;
+            secret/data/pingmessenger/platform/deploy AWS_REGION | AWS_REGION ;
+            secret/data/pingmessenger/platform/deploy EKS_CLUSTER | EKS_CLUSTER ;
+
+      - name: Resolve image tag and authenticate registry
+        id: tags
+        env:
+          REQUESTED_TAG: ${{ inputs.image_tag }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          REGISTRY_USER: ${{ steps.vault.outputs.REGISTRY_USER }}
+          REGISTRY_PASSWORD: ${{ steps.vault.outputs.REGISTRY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${REQUESTED_TAG:-block-status-${SOURCE_SHA::12}}"
+          if [[ ! "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "image tag contains unsupported characters" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "image=registry.meainternal.com/pingmessenger/openim-api:$tag" >> "$GITHUB_OUTPUT"
+          echo "$REGISTRY_PASSWORD" | docker login registry.meainternal.com --username "$REGISTRY_USER" --password-stdin
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        env:
+          IMAGE: ${{ steps.tags.outputs.image }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --platform linux/amd64 \
+            --file open-im-server/build/images/openim-api/Dockerfile.production \
+            --tag "$IMAGE" \
+            --label "org.opencontainers.image.revision=$SOURCE_SHA" \
+            --label "org.opencontainers.image.source=https://github.com/MECCADEV/open-im-server" \
+            --push .
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ steps.vault.outputs.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ steps.vault.outputs.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ steps.vault.outputs.AWS_REGION }}
+
+      - name: Write isolated kubeconfig
+        env:
+          AWS_REGION: ${{ steps.vault.outputs.AWS_REGION }}
+          EKS_CLUSTER: ${{ steps.vault.outputs.EKS_CLUSTER }}
+        run: |
+          set -euo pipefail
+          aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION" --kubeconfig "$RUNNER_TEMP/kubeconfig"
+          chmod 600 "$RUNNER_TEMP/kubeconfig"
+
+      - name: Roll out OpenIM API with rollback on failure
+        env:
+          KUBECONFIG: ${{ runner.temp }}/kubeconfig
+          IMAGE: ${{ steps.tags.outputs.image }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          namespace=openim
+          deployment=openimserver-openim-api
+          kubectl -n "$namespace" get deployment "$deployment" >/dev/null
+          container=$(kubectl -n "$namespace" get deployment "$deployment" -o json | jq -r \
+            '[.spec.template.spec.containers[] | select(.name == "openim-api" or .name == "openim-api-container")] | if length == 1 then .[0].name else empty end')
+          test -n "$container"
+          old_image=$(kubectl -n "$namespace" get deployment "$deployment" -o jsonpath="{.spec.template.spec.containers[?(@.name=='$container')].image}")
+          kubectl -n "$namespace" set image "deployment/$deployment" "$container=$IMAGE"
+          kubectl -n "$namespace" annotate deployment "$deployment" \
+            "pingmessenger.dev/deployed-by=github-actions" \
+            "pingmessenger.dev/deployed-sha=$SOURCE_SHA" \
+            "pingmessenger.dev/deployed-image=$IMAGE" --overwrite
+          if ! kubectl -n "$namespace" rollout status "deployment/$deployment" --timeout=10m; then
+            kubectl -n "$namespace" set image "deployment/$deployment" "$container=$old_image"
+            kubectl -n "$namespace" rollout status "deployment/$deployment" --timeout=10m
+            exit 1
+          fi
+          kubectl -n "$namespace" get deployment "$deployment" -o json | jq -e --arg image "$IMAGE" \
+            '[.spec.template.spec.containers[].image] | index($image) != null' >/dev/null
