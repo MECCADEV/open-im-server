@@ -20,6 +20,7 @@ import (
 
 	"github.com/openimsdk/open-im-server/v3/pkg/authverify"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/convert"
+	"github.com/openimsdk/open-im-server/v3/pkg/common/storage/controller"
 	"github.com/openimsdk/open-im-server/v3/pkg/common/storage/model"
 	"github.com/openimsdk/protocol/relation"
 	"github.com/openimsdk/protocol/sdkws"
@@ -49,7 +50,7 @@ func (s *friendServer) IsBlack(ctx context.Context, req *relation.IsBlackReq) (*
 	if err := authverify.CheckAccessIn(ctx, req.UserID1, req.UserID2); err != nil {
 		return nil, err
 	}
-	in1, in2, err := s.blackDatabase.CheckIn(ctx, req.UserID1, req.UserID2)
+	in1, in2, err := checkBlackPair(ctx, s.blackDatabase, req.UserID1, req.UserID2)
 	if err != nil {
 		return nil, err
 	}
@@ -57,6 +58,22 @@ func (s *friendServer) IsBlack(ctx context.Context, req *relation.IsBlackReq) (*
 	resp.InUser1Blacks = in1
 	resp.InUser2Blacks = in2
 	return resp, nil
+}
+
+// checkBlackPair reads the persisted blacklist records directly. CheckIn uses
+// the long-lived blacklist ID cache, which can briefly retain a deleted block
+// after RemoveBlack. The internal status API must reflect an unblock as soon
+// as the delete succeeds.
+func checkBlackPair(ctx context.Context, database controller.BlackDatabase, userID1, userID2 string) (bool, bool, error) {
+	user1Blacks, err := database.FindBlackInfos(ctx, userID1, []string{userID2})
+	if err != nil {
+		return false, false, err
+	}
+	user2Blacks, err := database.FindBlackInfos(ctx, userID2, []string{userID1})
+	if err != nil {
+		return false, false, err
+	}
+	return len(user1Blacks) != 0, len(user2Blacks) != 0, nil
 }
 
 func (s *friendServer) RemoveBlack(ctx context.Context, req *relation.RemoveBlackReq) (*relation.RemoveBlackResp, error) {
